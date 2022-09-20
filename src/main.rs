@@ -1,6 +1,7 @@
 use pty::fork::*;
 use std::io::{self, stdout, Read, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
+use std::os::unix::process::CommandExt;
 use std::process::{Command, Stdio};
 use termion::raw::IntoRawMode;
 
@@ -35,40 +36,24 @@ fn handle_stream(mut unix_stream: UnixStream) -> anyhow::Result<()> {
     let fork = Fork::from_ptmx().unwrap();
 
     if let Some(mut master) = fork.is_parent().ok() {
-        // Read output via PTY master
-        let mut output = String::new();
-
-        match master.read_to_string(&mut output) {
-            Ok(_nread) => println!("child tty is: {}", output.trim()),
-            Err(e) => panic!("read error: {}", e),
-        }
-    } else {
-        let mut cmd = Command::new("/bin/vim")
-            .args(vec!["monfichier"])
-            .stdout(Stdio::piped())
-            .stdin(Stdio::piped())
-            .spawn()?;
-
-        {
-            let stdout = cmd.stdout.as_mut().unwrap();
-            let stdin = cmd.stdin.as_mut().unwrap();
-            loop {
-                let _size = stdout
-                    .read(&mut bytesr)
-                    .context("failed at reading stdout")?;
-                if _size > 0 {
-                    let _size = unix_stream
-                        .write(&bytesr)
-                        .context("Failed at writing the unix stream")?;
-                }
+        loop {
+            let _size = unix_stream
+                .read(&mut bytes)
+                .context("Failed at reading the unix stream")?;
+            if _size > 0 {
+                master.write(&bytes).context("failed at writing stdin")?;
+            }
+            let _size = master
+                .read(&mut bytesr)
+                .context("failed at reading stdout")?;
+            if _size > 0 {
                 let _size = unix_stream
-                    .read(&mut bytes)
-                    .context("Failed at reading the unix stream")?;
-                if _size > 0 {
-                    stdin.write(&bytes).context("failed at writing stdin")?;
-                }
+                    .write(&bytesr)
+                    .context("Failed at writing the unix stream")?;
             }
         }
+    } else {
+        Command::new("/bin/vim").args(vec!["monfichier2"]).exec();
     }
 
     Ok(())
