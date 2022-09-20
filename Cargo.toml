@@ -1,0 +1,18 @@
+[package]
+name = "rdtach"
+version = "0.0.1"
+authors = ["yazgoo"]
+description = "Dtach in rust"
+documentation = "https://docs.rs/rdtach"
+homepage = "https://github.com/yazgoo/rdtach"
+repository = "https://github.com/yazgoo/rdtach"
+readme  = "README.md"
+keywords = ["fuzzy", "menu", "util"]
+license = "MIT"
+edition = "2018"
+
+[dependencies]
+nix = "0.25"
+anyhow = "1.0"
+termion = "1"
+pty = "0.2"
