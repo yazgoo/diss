@@ -178,10 +178,24 @@ fn write_request_and_shutdown(unix_stream: &mut UnixStream) -> anyhow::Result<()
         }
     });
 
+    // send terminal size
     let mut term_size = Message {
         mode: 0,
         size: termion::terminal_size()?,
         byte: 0,
+    };
+    let encoded: Vec<u8> = bincode::serialize(&term_size).unwrap();
+    unix_stream
+        .write_all(&encoded[..])
+        .context("Failed at writing the unix stream")?;
+    let mut unix_stream_stdin = unix_stream.try_clone()?;
+
+    unix_stream.flush()?;
+    // send CTRL+L to force redraw
+    let mut term_size = Message {
+        mode: 1,
+        size: (0, 0),
+        byte: 12,
     };
     let encoded: Vec<u8> = bincode::serialize(&term_size).unwrap();
     unix_stream
