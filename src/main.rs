@@ -28,15 +28,23 @@ fn server() -> anyhow::Result<()> {
     let unix_listener =
         UnixListener::bind(socket_path).context("Could not create the unix socket")?;
 
-    // put the server logic in a loop to accept several connections
-    loop {
-        println!("listening for new clients");
-        let (unix_stream, _socket_address) = unix_listener
-            .accept()
-            .context("Failed at accepting a connection on the unix listener")?;
-        handle_stream(unix_stream)?;
+    let fork = Fork::from_ptmx().unwrap();
+    if let Some(mut master) = fork.is_parent().ok() {
+        // put the server logic in a loop to accept several connections
+        loop {
+            println!("listening for new clients");
+            let (unix_stream, _socket_address) = unix_listener
+                .accept()
+                .context("Failed at accepting a connection on the unix listener")?;
+            handle_stream(unix_stream, master)?;
+        }
+        // fork.wait()?;
+    } else {
+        Command::new("/bin/vim")
+            .args(vec!["-u", "NONE", "monfichier2"])
+            .exec();
     }
-    // Ok(())
+    Ok(())
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -55,10 +63,8 @@ struct UnixSize {
     ws_ypixel: c_ushort,
 }
 
-fn handle_stream(mut unix_stream: UnixStream) -> anyhow::Result<()> {
+fn handle_stream(mut unix_stream: UnixStream, mut master: Master) -> anyhow::Result<()> {
     let mut bytesr = [0; 1];
-
-    let fork = Fork::from_ptmx().unwrap();
 
     let m: Message = Message {
         mode: 0,
@@ -67,57 +73,53 @@ fn handle_stream(mut unix_stream: UnixStream) -> anyhow::Result<()> {
     };
     let len = bincode::serialized_size(&m).unwrap() as usize;
 
-    if let Some(mut master) = fork.is_parent().ok() {
-        let mut master_reader = master.clone();
-        let mut unix_stream_reader = unix_stream.try_clone()?;
-        let fd = master.as_raw_fd();
-        thread::spawn(move || {
-            let mut bytes = vec![0; len];
-            loop {
-                unix_stream_reader
-                    .read_exact(&mut bytes)
-                    .context("Failed at reading the unix stream")
-                    .unwrap();
-                let message: Message = bincode::deserialize_from(&bytes[..])
-                    .context("failed at deseriazing bytes")
-                    .unwrap();
-                if message.mode == 0 {
-                    let us = UnixSize {
-                        ws_row: message.size.1,
-                        ws_col: message.size.0,
-                        ws_xpixel: 0,
-                        ws_ypixel: 0,
-                    };
-                    unsafe {
-                        libc::ioctl(fd, TIOCSWINSZ, &us);
-                    };
-                } else if message.mode == 1 {
-                    if master.write(&[message.byte]).is_err() {
-                        break;
-                    }
-                }
-            }
-        });
-        thread::spawn(move || loop {
-            let _size = master_reader
-                .read(&mut bytesr)
-                .context("failed at reading stdout")
-                .unwrap();
-            if _size > 0 {
-                let _size = unix_stream
-                    .write(&bytesr)
-                    .context("Failed at writing the unix stream")
-                    .unwrap();
-            } else {
+    let mut master_reader = master.clone();
+    let mut unix_stream_reader = unix_stream.try_clone()?;
+    let fd = master.as_raw_fd();
+    thread::spawn(move || {
+        let mut bytes = vec![0; len];
+        loop {
+            let res = unix_stream_reader.read_exact(&mut bytes);
+            if res.is_err() {
                 break;
             }
-        });
-        fork.wait()?;
-    } else {
-        Command::new("/bin/vim")
-            .args(vec!["-u", "NONE", "monfichier2"])
-            .exec();
-    }
+            res.context("Failed at reading the unix stream").unwrap();
+            let message: Message = bincode::deserialize_from(&bytes[..])
+                .context("failed at deseriazing bytes")
+                .unwrap();
+            if message.mode == 0 {
+                let us = UnixSize {
+                    ws_row: message.size.1,
+                    ws_col: message.size.0,
+                    ws_xpixel: 0,
+                    ws_ypixel: 0,
+                };
+                unsafe {
+                    libc::ioctl(fd, TIOCSWINSZ, &us);
+                };
+            } else if message.mode == 1 {
+                if master.write(&[message.byte]).is_err() {
+                    break;
+                }
+            } else if message.mode == 2 {
+                // detach
+            }
+        }
+    });
+    thread::spawn(move || loop {
+        let _size = master_reader
+            .read(&mut bytesr)
+            .context("failed at reading stdout")
+            .unwrap();
+        if _size > 0 {
+            let _size = unix_stream
+                .write(&bytesr)
+                .context("Failed at writing the unix stream")
+                .unwrap();
+        } else {
+            break;
+        }
+    });
 
     Ok(())
 }
@@ -193,6 +195,23 @@ fn write_request_and_shutdown(unix_stream: &mut UnixStream) -> anyhow::Result<()
             .context("failed at reading stdout")
             .unwrap();
         if _size > 0 {
+            if bytesr[0] == 4 {
+                // detach
+                let message = Message {
+                    mode: 2,
+                    size: (0, 0),
+                    byte: bytesr[0],
+                };
+                let encoded: Vec<u8> = bincode::serialize(&message).unwrap();
+                unix_stream_stdin
+                    .write_all(&encoded[..])
+                    .context("Failed at writing the unix stream")
+                    .unwrap();
+                unix_stream_stdin
+                    .shutdown(std::net::Shutdown::Write)
+                    .context("Could not shutdown writing on the stream")
+                    .unwrap();
+            }
             let message = Message {
                 mode: 1,
                 size: (0, 0),
