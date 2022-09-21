@@ -3,6 +3,7 @@ use std::io::{self, stdout, Read, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::os::unix::process::CommandExt;
 use std::process::{Command, Stdio};
+use std::thread;
 use termion::raw::IntoRawMode;
 
 use anyhow::Context;
@@ -30,20 +31,32 @@ fn server() -> anyhow::Result<()> {
 }
 
 fn handle_stream(mut unix_stream: UnixStream) -> anyhow::Result<()> {
-    let mut bytes = [0; 1];
     let mut bytesr = [0; 1];
 
     let fork = Fork::from_ptmx().unwrap();
+    print!("{}[2J", 27 as char);
+    stdout().flush()?;
 
     if let Some(mut master) = fork.is_parent().ok() {
-        loop {
-            let _size = unix_stream
-                .read(&mut bytes)
-                .context("Failed at reading the unix stream")?;
-            if _size > 0 {
-                master.write(&bytes).context("failed at writing stdin")?;
+        let mut master_reader = master.clone();
+        let mut unix_stream_reader = unix_stream.try_clone()?;
+        thread::spawn(move || {
+            let mut bytes = [0; 1];
+            loop {
+                let _size = unix_stream_reader
+                    .read(&mut bytes)
+                    .context("Failed at reading the unix stream")
+                    .unwrap();
+                if _size > 0 {
+                    master
+                        .write(&bytes)
+                        .context("failed at writing stdin")
+                        .unwrap();
+                }
             }
-            let _size = master
+        });
+        loop {
+            let _size = master_reader
                 .read(&mut bytesr)
                 .context("failed at reading stdout")?;
             if _size > 0 {
@@ -72,35 +85,44 @@ fn client() -> anyhow::Result<()> {
 fn write_request_and_shutdown(unix_stream: &mut UnixStream) -> anyhow::Result<()> {
     let mut _stdout = stdout().into_raw_mode()?;
     let mut bytesr = [0; 1];
-    for i in io::stdin().bytes() {
-        let bytes = vec![i?];
-        unix_stream
-            .write(&bytes)
-            .context("Failed at writing onto the unix stream")?;
-        let size = unix_stream
+    let mut stdin = io::stdin();
+
+    let mut unix_stream_reader = unix_stream.try_clone()?;
+
+    print!("{}[2J", 27 as char);
+    thread::spawn(move || {
+        let mut bytes = [0; 1];
+        loop {
+            let _size = unix_stream_reader
+                .read(&mut bytes)
+                .context("Failed at reading the unix stream")
+                .unwrap();
+            if _size > 0 {
+                _stdout
+                    .write(&bytes)
+                    .context("failed at writing stdin")
+                    .unwrap();
+                _stdout.flush().unwrap();
+            }
+        }
+    });
+    loop {
+        let _size = stdin
             .read(&mut bytesr)
-            .context("Failed at reading the unix stream")?;
-        _stdout.write_all(&bytes)?;
-        _stdout.flush()?;
+            .context("failed at reading stdout")?;
+        if _size > 0 {
+            let _size = unix_stream
+                .write(&bytesr)
+                .context("Failed at writing the unix stream")?;
+        }
     }
 
-    println!("We sent a request");
-    println!("Shutting down writing on the stream, waiting for response...");
-    let mut bytes = [0; 200];
+    /*
+        unix_stream
+            .shutdown(std::net::Shutdown::Write)
+            .context("Could not shutdown writing on the stream")?;
 
-    let size = unix_stream
-        .read(&mut bytes)
-        .context("Failed at reading the unix stream")?;
-
-    let message = std::str::from_utf8(&bytes)?;
-
-    println!("We received this message: {}\nReplying...", message);
-
-    unix_stream
-        .shutdown(std::net::Shutdown::Write)
-        .context("Could not shutdown writing on the stream")?;
-
-    Ok(())
+    */
 }
 
 fn main() -> anyhow::Result<()> {
