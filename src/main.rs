@@ -1,9 +1,10 @@
 use pty::fork::*;
+use serde::{Deserialize, Serialize};
 use std::io::{self, stdout, Read, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::os::unix::process::CommandExt;
 use std::process::{Command, Stdio};
-use std::thread;
+use std::{mem, thread};
 use termion::raw::IntoRawMode;
 
 use anyhow::Context;
@@ -30,6 +31,13 @@ fn server() -> anyhow::Result<()> {
     // Ok(())
 }
 
+#[derive(Serialize, Deserialize, Debug)]
+struct Message {
+    mode: u8,
+    size: (u16, u16),
+    byte: u8,
+}
+
 fn handle_stream(mut unix_stream: UnixStream) -> anyhow::Result<()> {
     let mut bytesr = [0; 1];
 
@@ -37,19 +45,38 @@ fn handle_stream(mut unix_stream: UnixStream) -> anyhow::Result<()> {
     print!("{}[2J", 27 as char);
     stdout().flush()?;
 
+    let m: Message = Message {
+        mode: 0,
+        size: (0, 0),
+        byte: 0,
+    };
+    let len = bincode::serialized_size(&m).unwrap() as usize;
+
     if let Some(mut master) = fork.is_parent().ok() {
         let mut master_reader = master.clone();
         let mut unix_stream_reader = unix_stream.try_clone()?;
         thread::spawn(move || {
-            let mut bytes = [0; 1];
+            let mut bytes = vec![0; len];
             loop {
-                let _size = unix_stream_reader
-                    .read(&mut bytes)
+                unix_stream_reader
+                    .read_exact(&mut bytes)
                     .context("Failed at reading the unix stream")
                     .unwrap();
-                if _size > 0 {
+                let message: Message = bincode::deserialize_from(&bytes[..])
+                    .context("failed at deseriazing bytes")
+                    .unwrap();
+                if message.mode == 0 {
+                    /* TODO: send resize to slave
+                    let resize_cmd =
+                        format!("\x1b[8;{};{}t", message.size.0, message.size.1).into_bytes();
                     master
-                        .write(&bytes)
+                        .write_all(&resize_cmd[..])
+                        .context("failed at writing stdin")
+                        .unwrap();
+                    */
+                } else if message.mode == 1 {
+                    master
+                        .write(&[message.byte])
                         .context("failed at writing stdin")
                         .unwrap();
                 }
@@ -66,7 +93,9 @@ fn handle_stream(mut unix_stream: UnixStream) -> anyhow::Result<()> {
             }
         }
     } else {
-        Command::new("/bin/vim").args(vec!["monfichier2"]).exec();
+        Command::new("/bin/vim")
+            .args(vec!["-u", "NONE", "monfichier2"])
+            .exec();
     }
 
     Ok(())
@@ -106,13 +135,28 @@ fn write_request_and_shutdown(unix_stream: &mut UnixStream) -> anyhow::Result<()
             }
         }
     });
+    let term_size = Message {
+        mode: 0,
+        size: termion::terminal_size()?,
+        byte: 0,
+    };
+    let encoded: Vec<u8> = bincode::serialize(&term_size).unwrap();
+    unix_stream
+        .write_all(&encoded[..])
+        .context("Failed at writing the unix stream")?;
     loop {
         let _size = stdin
             .read(&mut bytesr)
             .context("failed at reading stdout")?;
         if _size > 0 {
-            let _size = unix_stream
-                .write(&bytesr)
+            let message = Message {
+                mode: 1,
+                size: (0, 0),
+                byte: bytesr[0],
+            };
+            let encoded: Vec<u8> = bincode::serialize(&message).unwrap();
+            unix_stream
+                .write_all(&encoded[..])
                 .context("Failed at writing the unix stream")?;
         }
     }
