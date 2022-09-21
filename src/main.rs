@@ -1,9 +1,16 @@
+use nix::libc::{c_ushort, TIOCGWINSZ, TIOCSWINSZ};
+use nix::sys::ioctl;
+use nix::{ioctl_write_ptr, libc};
 use pty::fork::*;
 use serde::{Deserialize, Serialize};
+use signal_hook::{consts::SIGWINCH, iterator::Signals};
 use std::io::{self, stdout, Read, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
+use std::os::unix::prelude::AsRawFd;
 use std::os::unix::process::CommandExt;
 use std::process::{Command, Stdio};
+use std::sync::atomic::AtomicBool;
+use std::sync::Arc;
 use std::{mem, thread};
 use termion::raw::IntoRawMode;
 
@@ -23,6 +30,7 @@ fn server() -> anyhow::Result<()> {
 
     // put the server logic in a loop to accept several connections
     loop {
+        println!("listening for new clients");
         let (unix_stream, _socket_address) = unix_listener
             .accept()
             .context("Failed at accepting a connection on the unix listener")?;
@@ -38,12 +46,19 @@ struct Message {
     byte: u8,
 }
 
+#[derive(Debug)]
+#[repr(C)]
+struct UnixSize {
+    ws_row: c_ushort,
+    ws_col: c_ushort,
+    ws_xpixel: c_ushort,
+    ws_ypixel: c_ushort,
+}
+
 fn handle_stream(mut unix_stream: UnixStream) -> anyhow::Result<()> {
     let mut bytesr = [0; 1];
 
     let fork = Fork::from_ptmx().unwrap();
-    print!("{}[2J", 27 as char);
-    stdout().flush()?;
 
     let m: Message = Message {
         mode: 0,
@@ -55,6 +70,7 @@ fn handle_stream(mut unix_stream: UnixStream) -> anyhow::Result<()> {
     if let Some(mut master) = fork.is_parent().ok() {
         let mut master_reader = master.clone();
         let mut unix_stream_reader = unix_stream.try_clone()?;
+        let fd = master.as_raw_fd();
         thread::spawn(move || {
             let mut bytes = vec![0; len];
             loop {
@@ -66,32 +82,37 @@ fn handle_stream(mut unix_stream: UnixStream) -> anyhow::Result<()> {
                     .context("failed at deseriazing bytes")
                     .unwrap();
                 if message.mode == 0 {
-                    /* TODO: send resize to slave
-                    let resize_cmd =
-                        format!("\x1b[8;{};{}t", message.size.0, message.size.1).into_bytes();
-                    master
-                        .write_all(&resize_cmd[..])
-                        .context("failed at writing stdin")
-                        .unwrap();
-                    */
+                    let us = UnixSize {
+                        ws_row: message.size.1,
+                        ws_col: message.size.0,
+                        ws_xpixel: 0,
+                        ws_ypixel: 0,
+                    };
+                    unsafe {
+                        libc::ioctl(fd, TIOCSWINSZ, &us);
+                    };
                 } else if message.mode == 1 {
-                    master
-                        .write(&[message.byte])
-                        .context("failed at writing stdin")
-                        .unwrap();
+                    if master.write(&[message.byte]).is_err() {
+                        break;
+                    }
                 }
             }
         });
-        loop {
+        thread::spawn(move || loop {
             let _size = master_reader
                 .read(&mut bytesr)
-                .context("failed at reading stdout")?;
+                .context("failed at reading stdout")
+                .unwrap();
             if _size > 0 {
                 let _size = unix_stream
                     .write(&bytesr)
-                    .context("Failed at writing the unix stream")?;
+                    .context("Failed at writing the unix stream")
+                    .unwrap();
+            } else {
+                break;
             }
-        }
+        });
+        fork.wait()?;
     } else {
         Command::new("/bin/vim")
             .args(vec!["-u", "NONE", "monfichier2"])
@@ -122,20 +143,40 @@ fn write_request_and_shutdown(unix_stream: &mut UnixStream) -> anyhow::Result<()
     thread::spawn(move || {
         let mut bytes = [0; 1];
         loop {
-            let _size = unix_stream_reader
-                .read(&mut bytes)
-                .context("Failed at reading the unix stream")
-                .unwrap();
-            if _size > 0 {
-                _stdout
-                    .write(&bytes)
-                    .context("failed at writing stdin")
-                    .unwrap();
-                _stdout.flush().unwrap();
+            match unix_stream_reader.read(&mut bytes) {
+                Ok(_size) => {
+                    if _size > 0 {
+                        _stdout
+                            .write(&bytes)
+                            .context("failed at writing stdin")
+                            .unwrap();
+                        _stdout.flush().unwrap();
+                    }
+                }
+                Err(_) => break,
             }
         }
     });
-    let term_size = Message {
+
+    let term = Arc::new(AtomicBool::new(false));
+    signal_hook::flag::register(signal_hook::consts::SIGWINCH, Arc::clone(&term))?;
+    let mut unix_stream_resize = unix_stream.try_clone()?;
+
+    let t1 = thread::spawn(move || {
+        while !term.load(std::sync::atomic::Ordering::Relaxed) {
+            let mut term_size = Message {
+                mode: 0,
+                size: termion::terminal_size().unwrap(),
+                byte: 0,
+            };
+            let encoded: Vec<u8> = bincode::serialize(&term_size).unwrap();
+            if unix_stream_resize.write_all(&encoded[..]).is_err() {
+                break;
+            }
+        }
+    });
+
+    let mut term_size = Message {
         mode: 0,
         size: termion::terminal_size()?,
         byte: 0,
@@ -144,10 +185,13 @@ fn write_request_and_shutdown(unix_stream: &mut UnixStream) -> anyhow::Result<()
     unix_stream
         .write_all(&encoded[..])
         .context("Failed at writing the unix stream")?;
-    loop {
+    let mut unix_stream_stdin = unix_stream.try_clone()?;
+
+    let t2 = thread::spawn(move || loop {
         let _size = stdin
             .read(&mut bytesr)
-            .context("failed at reading stdout")?;
+            .context("failed at reading stdout")
+            .unwrap();
         if _size > 0 {
             let message = Message {
                 mode: 1,
@@ -155,18 +199,21 @@ fn write_request_and_shutdown(unix_stream: &mut UnixStream) -> anyhow::Result<()
                 byte: bytesr[0],
             };
             let encoded: Vec<u8> = bincode::serialize(&message).unwrap();
-            unix_stream
+            unix_stream_stdin
                 .write_all(&encoded[..])
-                .context("Failed at writing the unix stream")?;
+                .context("Failed at writing the unix stream")
+                .unwrap();
         }
-    }
+    });
 
-    /*
-        unix_stream
-            .shutdown(std::net::Shutdown::Write)
-            .context("Could not shutdown writing on the stream")?;
+    t1.join();
 
-    */
+    unix_stream
+        .shutdown(std::net::Shutdown::Write)
+        .context("Could not shutdown writing on the stream")?;
+
+    std::process::exit(0);
+    Ok(())
 }
 
 fn main() -> anyhow::Result<()> {
