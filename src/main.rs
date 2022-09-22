@@ -1,9 +1,11 @@
+use daemonize::Daemonize;
 use nix::libc::{c_ushort, TIOCGWINSZ, TIOCSWINSZ};
 use nix::sys::ioctl;
 use nix::{ioctl_write_ptr, libc};
 use pty::fork::*;
 use serde::{Deserialize, Serialize};
 use signal_hook::{consts::SIGWINCH, iterator::Signals};
+use std::fs::File;
 use std::io::{self, stdout, Read, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::os::unix::prelude::AsRawFd;
@@ -17,6 +19,9 @@ use termion::raw::IntoRawMode;
 use anyhow::Context;
 
 fn server(socket_path: String, command: String, args: Vec<String>) -> anyhow::Result<()> {
+    let stdout = File::create("/tmp/daemon.out").unwrap();
+    let stderr = File::create("/tmp/daemon.err").unwrap();
+
     if std::fs::metadata(&socket_path).is_ok() {
         println!("A socket is already present. Deleting...");
         std::fs::remove_file(&socket_path)
@@ -25,6 +30,12 @@ fn server(socket_path: String, command: String, args: Vec<String>) -> anyhow::Re
 
     let unix_listener =
         UnixListener::bind(socket_path).context("Could not create the unix socket")?;
+
+    let daemonize = Daemonize::new()
+        .stdout(stdout) // Redirect stdout to `/tmp/daemon.out`.
+        .stderr(stderr); // Redirect stderr to `/tmp/daemon.err`.
+
+    daemonize.start()?;
 
     let fork = Fork::from_ptmx().unwrap();
     if let Some(mut master) = fork.is_parent().ok() {
