@@ -4,7 +4,10 @@ use nix::sys::ioctl;
 use nix::{ioctl_write_ptr, libc};
 use pty::fork::*;
 use serde::{Deserialize, Serialize};
-use signal_hook::{consts::SIGWINCH, iterator::Signals};
+use signal_hook::{
+    consts::{SIGSTOP, SIGWINCH},
+    iterator::Signals,
+};
 use std::fs::File;
 use std::io::{self, stdout, Read, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
@@ -167,19 +170,21 @@ fn write_request_and_shutdown(unix_stream: &mut UnixStream) -> anyhow::Result<()
     });
 
     let term = Arc::new(AtomicBool::new(false));
-    signal_hook::flag::register(signal_hook::consts::SIGWINCH, Arc::clone(&term))?;
+    let mut signals = Signals::new(&[SIGWINCH])?;
     let mut unix_stream_resize = unix_stream.try_clone()?;
 
     let t1 = thread::spawn(move || {
-        while !term.load(std::sync::atomic::Ordering::Relaxed) {
-            let mut term_size = Message {
-                mode: 0,
-                size: termion::terminal_size().unwrap(),
-                byte: 0,
-            };
-            let encoded: Vec<u8> = bincode::serialize(&term_size).unwrap();
-            if unix_stream_resize.write_all(&encoded[..]).is_err() {
-                break;
+        for sig in signals.forever() {
+            if sig == SIGWINCH {
+                let mut term_size = Message {
+                    mode: 0,
+                    size: termion::terminal_size().unwrap(),
+                    byte: 0,
+                };
+                let encoded: Vec<u8> = bincode::serialize(&term_size).unwrap();
+                if unix_stream_resize.write_all(&encoded[..]).is_err() {
+                    break;
+                }
             }
         }
     });
