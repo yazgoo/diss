@@ -16,12 +16,10 @@ use termion::raw::IntoRawMode;
 
 use anyhow::Context;
 
-fn server() -> anyhow::Result<()> {
-    let socket_path = "mysocket";
-
-    if std::fs::metadata(socket_path).is_ok() {
+fn server(socket_path: String, command: String, args: Vec<String>) -> anyhow::Result<()> {
+    if std::fs::metadata(&socket_path).is_ok() {
         println!("A socket is already present. Deleting...");
-        std::fs::remove_file(socket_path)
+        std::fs::remove_file(&socket_path)
             .with_context(|| format!("could not delete previous socket at {:?}", socket_path))?;
     }
 
@@ -40,9 +38,7 @@ fn server() -> anyhow::Result<()> {
         }
         // fork.wait()?;
     } else {
-        Command::new("/bin/vim")
-            .args(vec!["-u", "NONE", "monfichier2"])
-            .exec();
+        Command::new(command).args(args).exec();
     }
     Ok(())
 }
@@ -112,10 +108,11 @@ fn handle_stream(mut unix_stream: UnixStream, mut master: Master) -> anyhow::Res
             .context("failed at reading stdout")
             .unwrap();
         if _size > 0 {
-            let _size = unix_stream
-                .write(&bytesr)
-                .context("Failed at writing the unix stream")
-                .unwrap();
+            let res = unix_stream.write(&bytesr);
+            if res.is_err() {
+                break;
+            }
+            res.context("Failed at writing the unix stream").unwrap();
         } else {
             break;
         }
@@ -124,9 +121,7 @@ fn handle_stream(mut unix_stream: UnixStream, mut master: Master) -> anyhow::Res
     Ok(())
 }
 
-fn client() -> anyhow::Result<()> {
-    let socket_path = "mysocket";
-
+fn client(socket_path: String) -> anyhow::Result<()> {
     let mut unix_stream = UnixStream::connect(socket_path).context("Could not create stream")?;
 
     write_request_and_shutdown(&mut unix_stream)?;
@@ -232,10 +227,11 @@ fn write_request_and_shutdown(unix_stream: &mut UnixStream) -> anyhow::Result<()
                 byte: bytesr[0],
             };
             let encoded: Vec<u8> = bincode::serialize(&message).unwrap();
-            unix_stream_stdin
-                .write_all(&encoded[..])
-                .context("Failed at writing the unix stream")
-                .unwrap();
+            let res = unix_stream_stdin.write_all(&encoded[..]);
+            if res.is_err() {
+                break;
+            }
+            res.context("Failed at writing the unix stream").unwrap();
         }
     });
 
@@ -251,9 +247,15 @@ fn write_request_and_shutdown(unix_stream: &mut UnixStream) -> anyhow::Result<()
 
 fn main() -> anyhow::Result<()> {
     let arg1 = std::env::args().nth(1);
+    let socket_path = std::env::args().nth(2).unwrap();
     match arg1 {
-        Some(action) if action == "server" => server(),
-        Some(action) if action == "client" => client(),
+        Some(action) if action == "server" => {
+            let command = std::env::args().nth(3).unwrap();
+            let all_args: Vec<String> = std::env::args().collect();
+            let remaining_args = &all_args[4..all_args.len()];
+            server(socket_path, command, remaining_args.to_vec())
+        }
+        Some(action) if action == "client" => client(socket_path),
         _ => Ok(()),
     }
 }
