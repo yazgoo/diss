@@ -1,14 +1,16 @@
 use daemonize::Daemonize;
-use nix::libc::{c_ushort, TIOCGWINSZ, TIOCSWINSZ};
+use nix::libc::{c_ushort, unlink, TIOCGWINSZ, TIOCSWINSZ};
 use nix::sys::ioctl;
+use nix::sys::wait::waitpid;
 use nix::{ioctl_write_ptr, libc};
 use pty::fork::*;
 use serde::{Deserialize, Serialize};
+use signal_hook::consts::TERM_SIGNALS;
 use signal_hook::{
     consts::{SIGSTOP, SIGWINCH},
     iterator::Signals,
 };
-use std::fs::File;
+use std::fs::{remove_file, File};
 use std::io::{self, stdout, Read, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::os::unix::prelude::AsRawFd;
@@ -31,6 +33,17 @@ fn server(socket_path: String, command: String, args: Vec<String>) -> anyhow::Re
             .with_context(|| format!("could not delete previous socket at {:?}", socket_path))?;
     }
 
+    let mut signals = Signals::new(TERM_SIGNALS)?;
+
+    let socket_path2 = socket_path.clone();
+
+    thread::spawn(move || {
+        for _ in signals.forever() {
+            println!("unlink {}", &socket_path2);
+            remove_file(&socket_path2).unwrap();
+        }
+    });
+
     let unix_listener =
         UnixListener::bind(socket_path).context("Could not create the unix socket")?;
 
@@ -43,14 +56,16 @@ fn server(socket_path: String, command: String, args: Vec<String>) -> anyhow::Re
     let fork = Fork::from_ptmx().unwrap();
     if let Some(mut master) = fork.is_parent().ok() {
         // put the server logic in a loop to accept several connections
+        thread::spawn(move || loop {
+            waitpid(None, None).unwrap();
+            std::process::exit(0);
+        });
         loop {
-            println!("listening for new clients");
             let (unix_stream, _socket_address) = unix_listener
                 .accept()
                 .context("Failed at accepting a connection on the unix listener")?;
             handle_stream(unix_stream, master)?;
         }
-        // fork.wait()?;
     } else {
         Command::new(command).args(args).exec();
     }
@@ -173,7 +188,7 @@ fn write_request_and_shutdown(unix_stream: &mut UnixStream) -> anyhow::Result<()
     let mut signals = Signals::new(&[SIGWINCH])?;
     let mut unix_stream_resize = unix_stream.try_clone()?;
 
-    let t1 = thread::spawn(move || {
+    thread::spawn(move || {
         for sig in signals.forever() {
             if sig == SIGWINCH {
                 let mut term_size = Message {
@@ -251,7 +266,7 @@ fn write_request_and_shutdown(unix_stream: &mut UnixStream) -> anyhow::Result<()
         }
     });
 
-    t1.join();
+    t2.join().unwrap();
 
     unix_stream
         .shutdown(std::net::Shutdown::Write)
