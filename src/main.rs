@@ -33,19 +33,8 @@ fn server(socket_path: String, command: String, args: Vec<String>) -> anyhow::Re
             .with_context(|| format!("could not delete previous socket at {:?}", socket_path))?;
     }
 
-    let mut signals = Signals::new(TERM_SIGNALS)?;
-
-    let socket_path2 = socket_path.clone();
-
-    thread::spawn(move || {
-        for _ in signals.forever() {
-            println!("unlink {}", &socket_path2);
-            remove_file(&socket_path2).unwrap();
-        }
-    });
-
     let unix_listener =
-        UnixListener::bind(socket_path).context("Could not create the unix socket")?;
+        UnixListener::bind(&socket_path).context("Could not create the unix socket")?;
 
     let daemonize = Daemonize::new()
         .stdout(stdout) // Redirect stdout to `/tmp/daemon.out`.
@@ -55,11 +44,13 @@ fn server(socket_path: String, command: String, args: Vec<String>) -> anyhow::Re
 
     let fork = Fork::from_ptmx().unwrap();
     if let Some(mut master) = fork.is_parent().ok() {
-        // put the server logic in a loop to accept several connections
         thread::spawn(move || loop {
             waitpid(None, None).unwrap();
+            println!("unlink {}", &socket_path);
+            remove_file(&socket_path).unwrap();
             std::process::exit(0);
         });
+        // put the server logic in a loop to accept several connections
         loop {
             let (unix_stream, _socket_address) = unix_listener
                 .accept()
