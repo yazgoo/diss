@@ -265,9 +265,7 @@ fn write_request_and_shutdown(unix_stream: &mut UnixStream) -> anyhow::Result<()
 
     unix_stream
         .shutdown(std::net::Shutdown::Write)
-        .context("Could not shutdown writing on the stream")?;
-
-    std::process::exit(0);
+        .context("Could not shutdown writing on the stream")
 }
 
 struct NoConfigDir;
