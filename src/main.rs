@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use clap::Parser;
 use diss::{list_sessions, server_client};
 
@@ -27,8 +29,9 @@ fn main() -> anyhow::Result<()> {
             println!("{}", session);
         }
     }
+    let env = HashMap::new();
     args.attach_session
         .as_ref()
-        .map(|session_name| server_client(session_name, &args.command));
+        .map(|session_name| server_client(session_name, &args.command, env));
     Ok(())
 }

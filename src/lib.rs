@@ -11,6 +11,7 @@ use signal_hook::{
     consts::{SIGINT, SIGWINCH},
     iterator::Signals,
 };
+use std::collections::HashMap;
 use std::fs::{self, remove_file};
 use std::io::{self, stdout, Read, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
@@ -23,7 +24,15 @@ use termion::raw::IntoRawMode;
 
 use anyhow::Context;
 
-fn server(socket_path: String, command: String, args: Vec<String>) -> anyhow::Result<()> {
+fn server(
+    socket_path: String,
+    command: String,
+    args: Vec<String>,
+    env: HashMap<String, String>,
+) -> anyhow::Result<()> {
+    for (k, v) in env {
+        std::env::set_var(k, v);
+    }
     if std::fs::metadata(&socket_path).is_ok() {
         println!("A socket is already present. Deleting...");
         std::fs::remove_file(&socket_path)
@@ -310,7 +319,11 @@ fn session_running(session_name: String) -> anyhow::Result<bool> {
     Ok(Path::new(&session_name_to_socket_path(session_name)?).exists())
 }
 
-pub fn server_client(session_name: &String, command: &Vec<String>) -> anyhow::Result<()> {
+pub fn server_client(
+    session_name: &String,
+    command: &Vec<String>,
+    env: HashMap<String, String>,
+) -> anyhow::Result<()> {
     let socket_path = session_name_to_socket_path(session_name.clone())?;
     if session_running(session_name.clone())? {
         client(socket_path)?;
@@ -326,6 +339,7 @@ pub fn server_client(session_name: &String, command: &Vec<String>) -> anyhow::Re
                     socket_path,
                     command_name.to_string(),
                     remaining_args.to_vec(),
+                    env,
                 )?;
             }
             ForkResult::Parent { .. } => {
