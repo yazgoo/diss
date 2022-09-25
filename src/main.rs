@@ -23,7 +23,9 @@ struct Args {
 fn main() -> anyhow::Result<()> {
     let args = Args::parse();
     if args.list {
-        list_sessions()?;
+        for session in list_sessions()? {
+            println!("{}", session);
+        }
     }
     args.attach_session
         .as_ref()

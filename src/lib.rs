@@ -294,13 +294,18 @@ fn session_name_to_socket_path(session_name: String) -> anyhow::Result<String> {
     Ok(format!("{}/{}", confdir, session_name))
 }
 
-pub fn list_sessions() -> anyhow::Result<()> {
+pub fn list_sessions() -> anyhow::Result<Vec<String>> {
     let paths = fs::read_dir(conf_dir()?)?;
-    for path in paths {
-        let file = path?;
-        println!("{}", file.path().display());
-    }
-    Ok(())
+    let res = paths
+        .map(|path| {
+            path.unwrap()
+                .file_name()
+                .to_str()
+                .unwrap_or("failed to unwrap file name")
+                .to_string()
+        })
+        .collect();
+    Ok(res)
 }
 
 fn session_running(session_name: String) -> anyhow::Result<bool> {
