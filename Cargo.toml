@@ -1,11 +1,11 @@
 [package]
-name = "rdtach"
+name = "diss"
 version = "0.0.1"
 authors = ["yazgoo"]
 description = "Dtach in rust"
-documentation = "https://docs.rs/rdtach"
-homepage = "https://github.com/yazgoo/rdtach"
-repository = "https://github.com/yazgoo/rdtach"
+documentation = "https://docs.rs/diss"
+homepage = "https://github.com/yazgoo/diss"
+repository = "https://github.com/yazgoo/diss"
 readme  = "README.md"
 keywords = ["fuzzy", "menu", "util"]
 license = "MIT"
