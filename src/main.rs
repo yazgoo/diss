@@ -1,24 +1,29 @@
+use clap::{arg, Parser};
+use core::time;
 use daemonize::Daemonize;
+use dirs::config_dir;
 use nix::libc::{c_ushort, unlink, TIOCGWINSZ, TIOCSWINSZ};
 use nix::sys::ioctl;
 use nix::sys::wait::waitpid;
+use nix::unistd::ForkResult;
 use nix::{ioctl_write_ptr, libc};
 use pty::fork::*;
 use serde::{Deserialize, Serialize};
 use signal_hook::consts::TERM_SIGNALS;
 use signal_hook::{
-    consts::{SIGSTOP, SIGWINCH},
+    consts::{SIGINT, SIGSTOP, SIGWINCH},
     iterator::Signals,
 };
-use std::fs::{remove_file, File};
+use std::fs::{self, remove_file, File};
 use std::io::{self, stdout, Read, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::os::unix::prelude::AsRawFd;
 use std::os::unix::process::CommandExt;
+use std::path::Path;
 use std::process::{Command, Stdio};
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
-use std::{mem, thread};
+use std::{fmt, mem, thread};
 use termion::raw::IntoRawMode;
 
 use anyhow::Context;
@@ -35,6 +40,17 @@ fn server(socket_path: String, command: String, args: Vec<String>) -> anyhow::Re
 
     let unix_listener =
         UnixListener::bind(&socket_path).context("Could not create the unix socket")?;
+
+    let socket_path2 = socket_path.clone();
+
+    let mut signals = Signals::new(&[SIGINT])?;
+
+    thread::spawn(move || {
+        for _ in signals.forever() {
+            println!("unlink2 {}", &socket_path2);
+            remove_file(&socket_path2).unwrap();
+        }
+    });
 
     let daemonize = Daemonize::new()
         .stdout(stdout) // Redirect stdout to `/tmp/daemon.out`.
@@ -267,17 +283,93 @@ fn write_request_and_shutdown(unix_stream: &mut UnixStream) -> anyhow::Result<()
     Ok(())
 }
 
-fn main() -> anyhow::Result<()> {
-    let arg1 = std::env::args().nth(1);
-    let socket_path = std::env::args().nth(2).unwrap();
-    match arg1 {
-        Some(action) if action == "server" => {
-            let command = std::env::args().nth(3).unwrap();
-            let all_args: Vec<String> = std::env::args().collect();
-            let remaining_args = &all_args[4..all_args.len()];
-            server(socket_path, command, remaining_args.to_vec())
-        }
-        Some(action) if action == "client" => client(socket_path),
-        _ => Ok(()),
+struct NoConfigDir;
+
+impl fmt::Display for NoConfigDir {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "no config dir")
     }
+}
+
+fn conf_dir() -> anyhow::Result<String> {
+    let dir = config_dir().ok_or(anyhow::anyhow!("config dir not found"))?;
+    let crate_name = option_env!("CARGO_PKG_NAME").unwrap_or("rda");
+    let dir_str = dir.as_path().display();
+    let confdir = format!("{}/{}", dir_str, crate_name);
+    if !Path::new(&confdir).exists() {
+        fs::create_dir(&confdir)?;
+    }
+    Ok(confdir)
+}
+
+fn session_name_to_socket_path(session_name: String) -> anyhow::Result<String> {
+    let confdir = conf_dir()?;
+    Ok(format!("{}/{}", confdir, session_name))
+}
+
+fn list_sessions() -> anyhow::Result<()> {
+    let paths = fs::read_dir(conf_dir()?)?;
+    for path in paths {
+        let file = path?;
+        println!("{}", file.path().display());
+    }
+    Ok(())
+}
+
+fn session_running(session_name: String) -> anyhow::Result<bool> {
+    Ok(Path::new(&session_name_to_socket_path(session_name)?).exists())
+}
+
+#[derive(Parser, Debug)]
+#[clap(author, version, about, long_about = None)]
+struct Args {
+    /// list sessions
+    #[clap(short, long, value_parser)]
+    list: bool,
+
+    // escape key
+    #[clap(short, long, value_parser)]
+    escape_key: Option<String>,
+
+    // session name
+    #[clap(short, long, value_parser)]
+    attach_session: Option<String>,
+
+    // command
+    command: Vec<String>,
+}
+
+fn server_client(args: &Args, session_name: &String) -> anyhow::Result<()> {
+    let socket_path = session_name_to_socket_path(session_name.clone())?;
+    if session_running(session_name.clone())? {
+        client(socket_path)?;
+    } else {
+        println!("fork");
+        let pid = unsafe { nix::unistd::fork() };
+        println!("pid: {:?}", pid);
+        match pid.expect("Fork Failed: Unable to create child process!") {
+            ForkResult::Child => {
+                let command = args.command.get(0).unwrap();
+                let remaining_args = &args.command[1..args.command.len()];
+                server(socket_path, command.to_string(), remaining_args.to_vec())?;
+            }
+            ForkResult::Parent { .. } => {
+                println!("parent");
+                thread::sleep(time::Duration::from_millis(100));
+                client(socket_path)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn main() -> anyhow::Result<()> {
+    let args = Args::parse();
+    if args.list {
+        list_sessions()?;
+    }
+    args.attach_session
+        .as_ref()
+        .map(|session_name| server_client(&args, session_name));
+    Ok(())
 }
