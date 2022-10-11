@@ -163,17 +163,37 @@ fn handle_stream(mut unix_stream: UnixStream, mut master: Master) -> anyhow::Res
     Ok(())
 }
 
-fn client(socket_path: String) -> anyhow::Result<()> {
+fn escape_key_to_byte(escape_key: Option<String>) -> u8 {
+    let allowed_keys = vec![
+        "a".to_string(),
+        "b".to_string(),
+        "c".to_string(),
+        "d".to_string(),
+        "e".to_string(),
+        "f".to_string(),
+        "g".to_string(),
+    ];
+    escape_key
+        .map(|x| {
+            allowed_keys
+                .iter()
+                .position(|y| y == &x)
+                .map(|i| i as u8 + 1)
+                .unwrap_or(1)
+        })
+        .unwrap_or(1)
+}
+
+fn client(socket_path: String, escape_key: Option<String>) -> anyhow::Result<()> {
     let mut unix_stream = UnixStream::connect(socket_path).context("Could not create stream")?;
 
-    write_request_and_shutdown(&mut unix_stream)?;
+    write_request_and_shutdown(&mut unix_stream, escape_key_to_byte(escape_key))?;
     // read_from_stream(&mut unix_stream)?;
     Ok(())
 }
 
-fn write_request_and_shutdown(unix_stream: &mut UnixStream) -> anyhow::Result<()> {
+fn write_request_and_shutdown(unix_stream: &mut UnixStream, escape_code: u8) -> anyhow::Result<()> {
     let mut _stdout = stdout().into_raw_mode()?;
-    let mut bytesr = [0; 1];
     let mut stdin = io::stdin();
 
     let mut unix_stream_reader =
@@ -249,13 +269,14 @@ fn write_request_and_shutdown(unix_stream: &mut UnixStream) -> anyhow::Result<()
         .context("Failed at writing the unix stream")?;
     let mut unix_stream_stdin = unix_stream.try_clone()?;
 
-    let t2 = thread::spawn(move || loop {
+    let mut bytesr = [0; 10];
+    let t2 = thread::spawn(move || 'outer: loop {
         let _size = stdin
             .read(&mut bytesr)
             .context("failed at reading stdout")
             .unwrap();
         if _size > 0 {
-            if bytesr[0] == 4 {
+            if _size == 1 && bytesr[0] == escape_code {
                 // detach
                 let message = Message {
                     mode: 2,
@@ -272,33 +293,35 @@ fn write_request_and_shutdown(unix_stream: &mut UnixStream) -> anyhow::Result<()
                     .context("Could not shutdown writing on the stream")
                     .unwrap();
             }
-            let message = Message {
-                mode: 1,
-                size: (0, 0),
-                byte: bytesr[0],
-            };
-            let encoded: Vec<u8> = bincode::serialize(&message).unwrap();
-            let res = unix_stream_stdin.write_all(&encoded[..]);
-            if res.is_err() {
-                break;
+            for b in &bytesr[.._size] {
+                let message = Message {
+                    mode: 1,
+                    size: (0, 0),
+                    byte: *b,
+                };
+                let encoded: Vec<u8> = bincode::serialize(&message).unwrap();
+                let res = unix_stream_stdin.write_all(&encoded[..]);
+                if res.is_err() {
+                    break 'outer;
+                }
+                res.context("Failed at writing the unix stream").unwrap();
             }
-            res.context("Failed at writing the unix stream").unwrap();
         }
     });
 
     t2.join().unwrap();
 
-    _stdout.suspend_raw_mode().unwrap();
+    _stdout.suspend_raw_mode()?;
+
+    done.store(true, Ordering::Relaxed);
 
     unix_stream
         .shutdown(std::net::Shutdown::Write)
-        .context("Could not shutdown writing on the stream");
+        .context("Could not shutdown writing on the stream")?;
 
     unix_stream
         .shutdown(std::net::Shutdown::Read)
-        .context("Could not shutdown writing on the stream");
-
-    done.store(true, Ordering::Relaxed);
+        .context("Could not shutdown writing on the stream")?;
 
     Ok(())
 }
@@ -349,10 +372,11 @@ pub fn server_client(
     session_name: &String,
     command: &Vec<String>,
     env: HashMap<String, String>,
+    escape_key: Option<String>,
 ) -> anyhow::Result<()> {
     let socket_path = session_name_to_socket_path(session_name.clone())?;
     if session_running(session_name.clone())? {
-        client(socket_path)?;
+        client(socket_path, escape_key)?;
     } else {
         let pid = unsafe { nix::unistd::fork() };
         match pid.expect("Fork Failed: Unable to create child process!") {
@@ -368,7 +392,7 @@ pub fn server_client(
             }
             ForkResult::Parent { .. } => {
                 thread::sleep(time::Duration::from_millis(100));
-                client(socket_path)?;
+                client(socket_path, escape_key)?;
             }
         }
     }
