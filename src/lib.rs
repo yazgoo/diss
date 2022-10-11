@@ -20,6 +20,8 @@ use std::os::unix::prelude::AsRawFd;
 use std::os::unix::process::CommandExt;
 use std::path::Path;
 use std::process::Command;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 use std::{env, fmt, thread};
 use termion::raw::IntoRawMode;
@@ -179,10 +181,15 @@ fn write_request_and_shutdown(unix_stream: &mut UnixStream) -> anyhow::Result<()
 
     print!("{}[2J", 27 as char);
     let mut _stdout2 = stdout();
-    let mut done = false;
-    let t1 = thread::spawn(move || {
+    let done = Arc::new(AtomicBool::new(false));
+
+    let done_in = done.clone();
+    thread::spawn(move || {
         let mut bytes = [0; 255];
-        while !done {
+        loop {
+            if done_in.load(Ordering::Relaxed) {
+                break;
+            }
             match unix_stream_reader.read(&mut bytes) {
                 Ok(_size) => {
                     if _size > 0 {
@@ -291,7 +298,7 @@ fn write_request_and_shutdown(unix_stream: &mut UnixStream) -> anyhow::Result<()
         .shutdown(std::net::Shutdown::Read)
         .context("Could not shutdown writing on the stream");
 
-    done = true;
+    done.store(true, Ordering::Relaxed);
 
     Ok(())
 }
