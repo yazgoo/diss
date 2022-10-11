@@ -13,14 +13,17 @@ use signal_hook::{
 };
 use std::collections::HashMap;
 use std::fs::{self, remove_file};
-use std::io::{self, stdout, Read, Write};
+use std::io::{self, stdout, Read};
+use std::io::{ErrorKind, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::os::unix::prelude::AsRawFd;
 use std::os::unix::process::CommandExt;
 use std::path::Path;
 use std::process::Command;
-use std::{fmt, thread};
+use std::time::Duration;
+use std::{env, fmt, thread};
 use termion::raw::IntoRawMode;
+use timeout_readwrite::TimeoutReader;
 
 use anyhow::Context;
 
@@ -30,8 +33,9 @@ fn server(
     args: Vec<String>,
     env: HashMap<String, String>,
 ) -> anyhow::Result<()> {
+    env.get("PWD").map(|dir| env::set_current_dir(dir));
     for (k, v) in env {
-        std::env::set_var(k, v);
+        env::set_var(k, v);
     }
     if std::fs::metadata(&socket_path).is_ok() {
         println!("A socket is already present. Deleting...");
@@ -55,7 +59,8 @@ fn server(
 
     let daemonize = Daemonize::new(); // Redirect stderr to `/tmp/daemon.err`.
 
-    daemonize.start()?;
+    let dir = env::current_dir()?;
+    daemonize.working_directory(dir).start()?;
 
     let fork = Fork::from_ptmx().unwrap();
     if let Some(master) = fork.is_parent().ok() {
@@ -169,22 +174,26 @@ fn write_request_and_shutdown(unix_stream: &mut UnixStream) -> anyhow::Result<()
     let mut bytesr = [0; 1];
     let mut stdin = io::stdin();
 
-    let mut unix_stream_reader = unix_stream.try_clone()?;
+    let mut unix_stream_reader =
+        TimeoutReader::new(unix_stream.try_clone()?, Duration::from_millis(200));
 
     print!("{}[2J", 27 as char);
-    thread::spawn(move || {
-        let mut bytes = [0; 1];
-        loop {
+    let mut _stdout2 = stdout();
+    let mut done = false;
+    let t1 = thread::spawn(move || {
+        let mut bytes = [0; 255];
+        while !done {
             match unix_stream_reader.read(&mut bytes) {
                 Ok(_size) => {
                     if _size > 0 {
-                        _stdout
-                            .write(&bytes)
+                        _stdout2
+                            .write(&bytes[0.._size])
                             .context("failed at writing stdin")
                             .unwrap();
-                        _stdout.flush().unwrap();
+                        _stdout2.flush().unwrap();
                     }
                 }
+                Err(ref e) if e.kind() == ErrorKind::TimedOut => {}
                 Err(_) => break,
             }
         }
@@ -272,9 +281,19 @@ fn write_request_and_shutdown(unix_stream: &mut UnixStream) -> anyhow::Result<()
 
     t2.join().unwrap();
 
+    _stdout.suspend_raw_mode().unwrap();
+
     unix_stream
         .shutdown(std::net::Shutdown::Write)
-        .context("Could not shutdown writing on the stream")
+        .context("Could not shutdown writing on the stream");
+
+    unix_stream
+        .shutdown(std::net::Shutdown::Read)
+        .context("Could not shutdown writing on the stream");
+
+    done = true;
+
+    Ok(())
 }
 
 struct NoConfigDir;
@@ -328,9 +347,7 @@ pub fn server_client(
     if session_running(session_name.clone())? {
         client(socket_path)?;
     } else {
-        println!("fork");
         let pid = unsafe { nix::unistd::fork() };
-        println!("pid: {:?}", pid);
         match pid.expect("Fork Failed: Unable to create child process!") {
             ForkResult::Child => {
                 let command_name = command.get(0).unwrap();
@@ -343,7 +360,6 @@ pub fn server_client(
                 )?;
             }
             ForkResult::Parent { .. } => {
-                println!("parent");
                 thread::sleep(time::Duration::from_millis(100));
                 client(socket_path)?;
             }

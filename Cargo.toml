@@ -22,3 +22,4 @@ signal-hook = "0.3"
 daemonize = "0.4"
 clap = { version = "3.2", features = ["derive"] }
 dirs = "4"
+timeout-readwrite = "0.3"
