@@ -1,3 +1,4 @@
+use bincode::{DefaultOptions, Options};
 use core::time;
 use daemonize::Daemonize;
 use dirs::config_dir;
@@ -102,9 +103,10 @@ struct Message {
 }
 
 fn send_message(unix_stream: &mut UnixStream, message: Message) -> anyhow::Result<()> {
-    let len = bincode::serialized_size(&message).unwrap() as usize;
-    unix_stream.write(&[len as u8])?;
-    let encoded: Vec<u8> = bincode::serialize(&message).unwrap();
+    let encoded = DefaultOptions::new()
+        .with_varint_encoding()
+        .serialize(&message)?;
+    unix_stream.write(&[encoded.len() as u8])?;
     unix_stream.write_all(&encoded[..]).map_err(|x| x.into())
 }
 
@@ -113,7 +115,10 @@ fn receive_message(unix_stream_reader: &mut UnixStream) -> anyhow::Result<Messag
     unix_stream_reader.read(&mut len_array)?;
     let mut bytes = vec![0; len_array[0].into()];
     unix_stream_reader.read_exact(&mut bytes)?;
-    bincode::deserialize_from(&bytes[..]).map_err(|e| e.into())
+    DefaultOptions::new()
+        .with_varint_encoding()
+        .deserialize_from(&bytes[..])
+        .map_err(|e| e.into())
 }
 
 fn handle_stream(mut unix_stream: UnixStream, mut master: Master) -> anyhow::Result<()> {
