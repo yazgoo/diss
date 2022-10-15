@@ -1,4 +1,8 @@
-Dissociates a program from current terminal (like dtach, abduco).
+## What is dis ?
+
+diss is like dtach, abduco.
+diss dissociates a program from current terminal.
+diss is also a crate you can integrate easily in your projects.
 
 ## create session (or reatach if already exists)
 

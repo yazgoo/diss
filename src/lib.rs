@@ -85,13 +85,6 @@ fn server(
     Ok(())
 }
 
-#[derive(Serialize, Deserialize, Debug)]
-struct Message {
-    mode: u8,
-    size: (u16, u16),
-    byte: u8,
-}
-
 #[derive(Debug)]
 #[repr(C)]
 struct UnixSize {
@@ -101,28 +94,41 @@ struct UnixSize {
     ws_ypixel: c_ushort,
 }
 
+#[derive(Serialize, Deserialize, Debug)]
+struct Message {
+    mode: u8,
+    size: (u16, u16),
+    byte: u8,
+}
+
+fn send_message(unix_stream: &mut UnixStream, message: Message) -> anyhow::Result<()> {
+    let len = bincode::serialized_size(&message).unwrap() as usize;
+    unix_stream.write(&[len as u8])?;
+    let encoded: Vec<u8> = bincode::serialize(&message).unwrap();
+    unix_stream.write_all(&encoded[..]).map_err(|x| x.into())
+}
+
+fn receive_message(unix_stream_reader: &mut UnixStream) -> anyhow::Result<Message> {
+    let mut len_array = vec![0; 1];
+    unix_stream_reader.read(&mut len_array)?;
+    let mut bytes = vec![0; len_array[0].into()];
+    unix_stream_reader.read_exact(&mut bytes)?;
+    bincode::deserialize_from(&bytes[..]).map_err(|e| e.into())
+}
+
 fn handle_stream(mut unix_stream: UnixStream, mut master: Master) -> anyhow::Result<()> {
     let mut bytesr = [0; 1];
-
-    let m: Message = Message {
-        mode: 0,
-        size: (0, 0),
-        byte: 0,
-    };
-    let len = bincode::serialized_size(&m).unwrap() as usize;
 
     let mut master_reader = master.clone();
     let mut unix_stream_reader = unix_stream.try_clone()?;
     let fd = master.as_raw_fd();
     thread::spawn(move || {
-        let mut bytes = vec![0; len];
         loop {
-            let res = unix_stream_reader.read_exact(&mut bytes);
-            if res.is_err() {
+            let message_result = receive_message(&mut unix_stream_reader);
+            if message_result.is_err() {
                 break;
             }
-            res.context("Failed at reading the unix stream").unwrap();
-            let message: Message = bincode::deserialize_from(&bytes[..])
+            let message = message_result
                 .context("failed at deseriazing bytes")
                 .unwrap();
             if message.mode == 0 {
@@ -232,13 +238,16 @@ fn write_request_and_shutdown(unix_stream: &mut UnixStream, escape_code: u8) -> 
     thread::spawn(move || {
         for sig in signals.forever() {
             if sig == SIGWINCH {
-                let term_size = Message {
-                    mode: 0,
-                    size: termion::terminal_size().unwrap(),
-                    byte: 0,
-                };
-                let encoded: Vec<u8> = bincode::serialize(&term_size).unwrap();
-                if unix_stream_resize.write_all(&encoded[..]).is_err() {
+                if send_message(
+                    &mut unix_stream_resize,
+                    Message {
+                        mode: 0,
+                        size: termion::terminal_size().unwrap(),
+                        byte: 0,
+                    },
+                )
+                .is_err()
+                {
                     break;
                 }
             }
@@ -246,27 +255,27 @@ fn write_request_and_shutdown(unix_stream: &mut UnixStream, escape_code: u8) -> 
     });
 
     // send terminal size
-    let term_size = Message {
-        mode: 0,
-        size: termion::terminal_size()?,
-        byte: 0,
-    };
-    let encoded: Vec<u8> = bincode::serialize(&term_size).unwrap();
-    unix_stream
-        .write_all(&encoded[..])
-        .context("Failed at writing the unix stream")?;
+    send_message(
+        unix_stream,
+        Message {
+            mode: 0,
+            size: termion::terminal_size()?,
+            byte: 0,
+        },
+    )
+    .context("Failed at writing the unix stream")?;
 
     unix_stream.flush()?;
     // send CTRL+L to force redraw
-    let term_size = Message {
-        mode: 1,
-        size: (0, 0),
-        byte: 12,
-    };
-    let encoded: Vec<u8> = bincode::serialize(&term_size).unwrap();
-    unix_stream
-        .write_all(&encoded[..])
-        .context("Failed at writing the unix stream")?;
+    send_message(
+        unix_stream,
+        Message {
+            mode: 1,
+            size: (0, 0),
+            byte: 12,
+        },
+    )
+    .context("Failed at writing the unix stream")?;
     let mut unix_stream_stdin = unix_stream.try_clone()?;
 
     let mut bytesr = [0; 10];
@@ -278,33 +287,33 @@ fn write_request_and_shutdown(unix_stream: &mut UnixStream, escape_code: u8) -> 
         if _size > 0 {
             if _size == 1 && bytesr[0] == escape_code {
                 // detach
-                let message = Message {
-                    mode: 2,
-                    size: (0, 0),
-                    byte: bytesr[0],
-                };
-                let encoded: Vec<u8> = bincode::serialize(&message).unwrap();
-                unix_stream_stdin
-                    .write_all(&encoded[..])
-                    .context("Failed at writing the unix stream")
-                    .unwrap();
+                send_message(
+                    &mut unix_stream_stdin,
+                    Message {
+                        mode: 2,
+                        size: (0, 0),
+                        byte: bytesr[0],
+                    },
+                )
+                .context("Failed at writing the unix stream")
+                .unwrap();
                 unix_stream_stdin
                     .shutdown(std::net::Shutdown::Write)
                     .context("Could not shutdown writing on the stream")
                     .unwrap();
             }
             for b in &bytesr[.._size] {
-                let message = Message {
-                    mode: 1,
-                    size: (0, 0),
-                    byte: *b,
-                };
-                let encoded: Vec<u8> = bincode::serialize(&message).unwrap();
-                let res = unix_stream_stdin.write_all(&encoded[..]);
+                let res = send_message(
+                    &mut unix_stream_stdin,
+                    Message {
+                        mode: 1,
+                        size: (0, 0),
+                        byte: *b,
+                    },
+                );
                 if res.is_err() {
                     break 'outer;
                 }
-                res.context("Failed at writing the unix stream").unwrap();
             }
         }
     });
