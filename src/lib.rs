@@ -99,10 +99,10 @@ struct UnixSize {
 struct Message {
     mode: u8,
     size: (u16, u16),
-    byte: u8,
+    bytes: Vec<u8>,
 }
 
-fn send_message(unix_stream: &mut UnixStream, message: Message) -> anyhow::Result<()> {
+fn send_message(unix_stream: &mut UnixStream, message: &Message) -> anyhow::Result<()> {
     let encoded = DefaultOptions::new()
         .with_varint_encoding()
         .serialize(&message)?;
@@ -111,8 +111,6 @@ fn send_message(unix_stream: &mut UnixStream, message: Message) -> anyhow::Resul
 }
 
 fn handle_stream(mut unix_stream: UnixStream, mut master: Master) -> anyhow::Result<()> {
-    let mut bytesr = [0; 1];
-
     let mut master_reader = master.clone();
     let mut unix_stream_reader = unix_stream.try_clone()?;
     let fd = master.as_raw_fd();
@@ -138,7 +136,7 @@ fn handle_stream(mut unix_stream: UnixStream, mut master: Master) -> anyhow::Res
                     libc::ioctl(fd, TIOCSWINSZ, &us);
                 };
             } else if message.mode == 1 {
-                if master.write(&[message.byte]).is_err() {
+                if master.write(&message.bytes).is_err() {
                     break;
                 }
             } else if message.mode == 2 {
@@ -146,13 +144,14 @@ fn handle_stream(mut unix_stream: UnixStream, mut master: Master) -> anyhow::Res
             }
         }
     });
+    let mut bytesr = [0; 1024];
     thread::spawn(move || loop {
-        let _size = master_reader
+        let size = master_reader
             .read(&mut bytesr)
             .context("failed at reading stdout")
             .unwrap();
-        if _size > 0 {
-            let res = unix_stream.write(&bytesr);
+        if size > 0 {
+            let res = unix_stream.write(&bytesr[0..size]);
             if res.is_err() {
                 break;
             }
@@ -236,10 +235,10 @@ fn write_request_and_shutdown(unix_stream: &mut UnixStream, escape_code: u8) -> 
             if sig == SIGWINCH {
                 if send_message(
                     &mut unix_stream_resize,
-                    Message {
+                    &Message {
                         mode: 0,
                         size: termion::terminal_size().unwrap(),
-                        byte: 0,
+                        bytes: vec![0],
                     },
                 )
                 .is_err()
@@ -253,10 +252,10 @@ fn write_request_and_shutdown(unix_stream: &mut UnixStream, escape_code: u8) -> 
     // send terminal size
     send_message(
         unix_stream,
-        Message {
+        &Message {
             mode: 0,
             size: termion::terminal_size()?,
-            byte: 0,
+            bytes: vec![0],
         },
     )
     .context("Failed at writing the unix stream")?;
@@ -265,16 +264,16 @@ fn write_request_and_shutdown(unix_stream: &mut UnixStream, escape_code: u8) -> 
     // send CTRL+L to force redraw
     send_message(
         unix_stream,
-        Message {
+        &Message {
             mode: 1,
             size: (0, 0),
-            byte: 12,
+            bytes: vec![12],
         },
     )
     .context("Failed at writing the unix stream")?;
     let mut unix_stream_stdin = unix_stream.try_clone()?;
 
-    let mut bytesr = [0; 10];
+    let mut bytesr = [0; 1024];
     let t2 = thread::spawn(move || 'outer: loop {
         let _size = stdin
             .read(&mut bytesr)
@@ -285,10 +284,10 @@ fn write_request_and_shutdown(unix_stream: &mut UnixStream, escape_code: u8) -> 
                 // detach
                 send_message(
                     &mut unix_stream_stdin,
-                    Message {
+                    &Message {
                         mode: 2,
                         size: (0, 0),
-                        byte: bytesr[0],
+                        bytes: vec![bytesr[0]],
                     },
                 )
                 .context("Failed at writing the unix stream")
@@ -298,18 +297,16 @@ fn write_request_and_shutdown(unix_stream: &mut UnixStream, escape_code: u8) -> 
                     .context("Could not shutdown writing on the stream")
                     .unwrap();
             }
-            for b in &bytesr[.._size] {
-                let res = send_message(
-                    &mut unix_stream_stdin,
-                    Message {
-                        mode: 1,
-                        size: (0, 0),
-                        byte: *b,
-                    },
-                );
-                if res.is_err() {
-                    break 'outer;
-                }
+            let res = send_message(
+                &mut unix_stream_stdin,
+                &Message {
+                    mode: 1,
+                    size: (0, 0),
+                    bytes: bytesr[.._size].into(),
+                },
+            );
+            if res.is_err() {
+                break 'outer;
             }
         }
     });
