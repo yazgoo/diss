@@ -110,21 +110,24 @@ fn send_message(unix_stream: &mut UnixStream, message: &Message) -> anyhow::Resu
     unix_stream.write_all(&encoded[..]).map_err(|x| x.into())
 }
 
+fn receive_message(unix_stream_reader: &mut UnixStream) -> anyhow::Result<Message> {
+    let mut len_array = vec![0; 1];
+    unix_stream_reader.read(&mut len_array)?;
+    let mut bytes = vec![0; len_array[0].into()];
+    unix_stream_reader.read_exact(&mut bytes)?;
+    DefaultOptions::new()
+        .with_varint_encoding()
+        .deserialize_from(&bytes[..])
+        .map_err(|x| x.into())
+}
+
 fn handle_stream(mut unix_stream: UnixStream, mut master: Master) -> anyhow::Result<()> {
     let mut master_reader = master.clone();
     let mut unix_stream_reader = unix_stream.try_clone()?;
     let fd = master.as_raw_fd();
     thread::spawn(move || {
         loop {
-            let mut len_array = vec![0; 1];
-            unix_stream_reader.read(&mut len_array).unwrap();
-            let mut bytes = vec![0; len_array[0].into()];
-            unix_stream_reader.read_exact(&mut bytes).unwrap();
-            let message: Message = DefaultOptions::new()
-                .with_varint_encoding()
-                .deserialize_from(&bytes[..])
-                .unwrap();
-
+            let message = receive_message(&mut unix_stream_reader).unwrap();
             if message.mode == 0 {
                 let us = UnixSize {
                     ws_row: message.size.1,
