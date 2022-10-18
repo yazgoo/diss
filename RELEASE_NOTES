@@ -1,0 +1,4 @@
+0.0.6
+
+- send bytes buffers instead off one by one
+- improve display speed
