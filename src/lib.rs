@@ -36,7 +36,7 @@ fn server(
     args: Vec<String>,
     env: HashMap<String, String>,
 ) -> anyhow::Result<()> {
-    env.get("PWD").map(|dir| env::set_current_dir(dir));
+    env.get("PWD").map(env::set_current_dir);
     for (k, v) in env {
         env::set_var(k, v);
     }
@@ -66,7 +66,7 @@ fn server(
     daemonize.working_directory(dir).start()?;
 
     let fork = Fork::from_ptmx().unwrap();
-    if let Some(master) = fork.is_parent().ok() {
+    if let Ok(master) = fork.is_parent() {
         thread::spawn(move || loop {
             waitpid(None, None).unwrap();
             println!("unlink {}", &socket_path);
@@ -106,13 +106,13 @@ fn send_message(unix_stream: &mut UnixStream, message: &Message) -> anyhow::Resu
     let encoded = DefaultOptions::new()
         .with_varint_encoding()
         .serialize(&message)?;
-    unix_stream.write(&[encoded.len() as u8])?;
+    unix_stream.write_all(&[encoded.len() as u8])?;
     unix_stream.write_all(&encoded[..]).map_err(|x| x.into())
 }
 
 fn receive_message(unix_stream_reader: &mut UnixStream) -> anyhow::Result<Message> {
     let mut len_array = vec![0; 1];
-    unix_stream_reader.read(&mut len_array)?;
+    unix_stream_reader.read_exact(&mut len_array)?;
     let mut bytes = vec![0; len_array[0].into()];
     unix_stream_reader.read_exact(&mut bytes)?;
     DefaultOptions::new()
@@ -122,7 +122,7 @@ fn receive_message(unix_stream_reader: &mut UnixStream) -> anyhow::Result<Messag
 }
 
 fn handle_stream(mut unix_stream: UnixStream, mut master: Master) -> anyhow::Result<()> {
-    let mut master_reader = master.clone();
+    let mut master_reader = master;
     let mut unix_stream_reader = unix_stream.try_clone()?;
     let fd = master.as_raw_fd();
     thread::spawn(move || {
@@ -235,8 +235,8 @@ fn write_request_and_shutdown(unix_stream: &mut UnixStream, escape_code: u8) -> 
 
     thread::spawn(move || {
         for sig in signals.forever() {
-            if sig == SIGWINCH {
-                if send_message(
+            if sig == SIGWINCH
+                && send_message(
                     &mut unix_stream_resize,
                     &Message {
                         mode: 0,
@@ -245,9 +245,8 @@ fn write_request_and_shutdown(unix_stream: &mut UnixStream, escape_code: u8) -> 
                     },
                 )
                 .is_err()
-                {
-                    break;
-                }
+            {
+                break;
             }
         }
     });
@@ -340,7 +339,7 @@ impl fmt::Display for NoConfigDir {
 }
 
 fn conf_dir() -> anyhow::Result<String> {
-    let dir = config_dir().ok_or(anyhow::anyhow!("config dir not found"))?;
+    let dir = config_dir().ok_or_else(|| anyhow::anyhow!("config dir not found"))?;
     let crate_name = option_env!("CARGO_PKG_NAME").unwrap_or("rda");
     let dir_str = dir.as_path().display();
     let confdir = format!("{}/{}", dir_str, crate_name);
@@ -374,13 +373,13 @@ fn session_running(session_name: String) -> anyhow::Result<bool> {
 }
 
 pub fn server_client(
-    session_name: &String,
-    command: &Vec<String>,
+    session_name: &str,
+    command: &[String],
     env: HashMap<String, String>,
     escape_key: Option<String>,
 ) -> anyhow::Result<()> {
-    let socket_path = session_name_to_socket_path(session_name.clone())?;
-    if session_running(session_name.clone())? {
+    let socket_path = session_name_to_socket_path(session_name.to_string())?;
+    if session_running(session_name.to_string())? {
         client(socket_path, escape_key)?;
     } else {
         let pid = unsafe { nix::unistd::fork() };

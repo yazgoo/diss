@@ -1,6 +1,6 @@
 [package]
 name = "diss"
-version = "0.0.6"
+version = "0.0.7"
 authors = ["yazgoo"]
 description = "dissociate program from your terminal"
 documentation = "https://docs.rs/diss"
