@@ -66,22 +66,25 @@ fn server(
     daemonize.working_directory(dir).start()?;
 
     let fork = Fork::from_ptmx().unwrap();
-    if let Ok(master) = fork.is_parent() {
-        thread::spawn(move || loop {
-            waitpid(None, None).unwrap();
-            println!("unlink {}", &socket_path);
-            remove_file(&socket_path).unwrap();
-            std::process::exit(0);
-        });
-        // put the server logic in a loop to accept several connections
-        loop {
-            let (unix_stream, _socket_address) = unix_listener
-                .accept()
-                .context("Failed at accepting a connection on the unix listener")?;
-            handle_stream(unix_stream, master)?;
+    match fork {
+        Fork::Parent(pid, master) => {
+            thread::spawn(move || loop {
+                waitpid(None, None).unwrap();
+                println!("unlink {}", &socket_path);
+                remove_file(&socket_path).unwrap();
+                std::process::exit(0);
+            });
+            // put the server logic in a loop to accept several connections
+            loop {
+                let (unix_stream, _socket_address) = unix_listener
+                    .accept()
+                    .context("Failed at accepting a connection on the unix listener")?;
+                handle_stream(unix_stream, pid, master)?;
+            }
         }
-    } else {
-        Command::new(command).args(args).exec();
+        Fork::Child(_) => {
+            Command::new(command).args(args).exec();
+        }
     }
     Ok(())
 }
@@ -121,7 +124,17 @@ fn receive_message(unix_stream_reader: &mut UnixStream) -> anyhow::Result<Messag
         .map_err(|x| x.into())
 }
 
-fn handle_stream(mut unix_stream: UnixStream, mut master: Master) -> anyhow::Result<()> {
+fn _log(s: &str) {
+    let mut file = fs::OpenOptions::new()
+        .write(true)
+        .append(true)
+        .open("/tmp/log")
+        .unwrap();
+
+    let _ = writeln!(file, "{}", s);
+}
+
+fn handle_stream(mut unix_stream: UnixStream, pid: i32, mut master: Master) -> anyhow::Result<()> {
     let mut master_reader = master;
     let mut unix_stream_reader = unix_stream.try_clone()?;
     let fd = master.as_raw_fd();
@@ -144,6 +157,11 @@ fn handle_stream(mut unix_stream: UnixStream, mut master: Master) -> anyhow::Res
                 }
             } else if message.mode == 2 {
                 // detach
+            } else if message.mode == 3 {
+                // redraw
+                unsafe {
+                    libc::kill(pid, SIGWINCH);
+                }
             }
         }
     });
@@ -267,7 +285,7 @@ fn write_request_and_shutdown(unix_stream: &mut UnixStream, escape_code: u8) -> 
     send_message(
         unix_stream,
         &Message {
-            mode: 1,
+            mode: 3,
             size: (0, 0),
             bytes: vec![12],
         },
