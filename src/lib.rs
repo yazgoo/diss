@@ -22,7 +22,7 @@ use std::os::unix::process::CommandExt;
 use std::path::Path;
 use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 use std::time::Duration;
 use std::{env, fmt, thread};
 use termion::raw::IntoRawMode;
@@ -113,7 +113,7 @@ fn send_message(unix_stream: &mut UnixStream, message: &Message) -> anyhow::Resu
     unix_stream.write_all(&encoded[..]).map_err(|x| x.into())
 }
 
-fn receive_message(unix_stream_reader: &mut UnixStream) -> anyhow::Result<Message> {
+fn receive_message(unix_stream_reader: &mut TimeoutReader<UnixStream>) -> anyhow::Result<Message> {
     let mut len_array = vec![0; 1];
     unix_stream_reader.read_exact(&mut len_array)?;
     let mut bytes = vec![0; len_array[0].into()];
@@ -134,51 +134,88 @@ fn _log(s: &str) {
     let _ = writeln!(file, "{}", s);
 }
 
+pub fn underlying_io_error_kind(error: &anyhow::Error) -> Option<io::ErrorKind> {
+    for cause in error.chain() {
+        if let Some(io_error) = cause.downcast_ref::<io::Error>() {
+            return Some(io_error.kind());
+        }
+    }
+    None
+}
+
 fn handle_stream(mut unix_stream: UnixStream, pid: i32, mut master: Master) -> anyhow::Result<()> {
-    let mut master_reader = master;
-    let mut unix_stream_reader = unix_stream.try_clone()?;
+    // read input from unix stream and pass it on to the forked process
+    let unix_stream_readers = Arc::new(RwLock::new(vec![TimeoutReader::new(
+        unix_stream.try_clone()?,
+        Duration::from_millis(200),
+    )]));
     let fd = master.as_raw_fd();
     thread::spawn(move || {
-        loop {
-            let message = receive_message(&mut unix_stream_reader).unwrap();
-            if message.mode == 0 {
-                let us = UnixSize {
-                    ws_row: message.size.1,
-                    ws_col: message.size.0,
-                    ws_xpixel: 0,
-                    ws_ypixel: 0,
-                };
-                unsafe {
-                    libc::ioctl(fd, TIOCSWINSZ, &us);
-                };
-            } else if message.mode == 1 {
-                if master.write(&message.bytes).is_err() {
-                    break;
-                }
-            } else if message.mode == 2 {
-                // detach
-            } else if message.mode == 3 {
-                // redraw
-                unsafe {
-                    libc::kill(pid, SIGWINCH);
+        'outer: loop {
+            let for_read = &mut unix_stream_readers.write().unwrap();
+            if for_read.len() == 0 {
+                thread::sleep(time::Duration::from_millis(100));
+            }
+            for mut reader in for_read.iter_mut() {
+                match receive_message(&mut reader) {
+                    Ok(message) => {
+                        if message.mode == 0 {
+                            let us = UnixSize {
+                                ws_row: message.size.1,
+                                ws_col: message.size.0,
+                                ws_xpixel: 0,
+                                ws_ypixel: 0,
+                            };
+                            unsafe {
+                                libc::ioctl(fd, TIOCSWINSZ, &us);
+                            };
+                        } else if message.mode == 1 {
+                            if master.write(&message.bytes).is_err() {
+                                break;
+                            }
+                        } else if message.mode == 2 {
+                            // detach
+                        } else if message.mode == 3 {
+                            // redraw
+                            unsafe {
+                                libc::kill(pid, SIGWINCH);
+                            }
+                        }
+                    }
+                    Err(ref e) if underlying_io_error_kind(&e) == Some(ErrorKind::TimedOut) => {}
+                    Err(_) => break 'outer,
                 }
             }
         }
     });
+
+    // forked-process > unix stream
+    let master_readers = Arc::new(RwLock::new(vec![TimeoutReader::new(
+        master,
+        Duration::from_millis(200),
+    )]));
     let mut bytesr = [0; 1024];
-    thread::spawn(move || loop {
-        let size = master_reader
-            .read(&mut bytesr)
-            .context("failed at reading stdout")
-            .unwrap();
-        if size > 0 {
-            let res = unix_stream.write(&bytesr[0..size]);
-            if res.is_err() {
-                break;
+    thread::spawn(move || 'outer: loop {
+        let for_read = &mut master_readers.write().unwrap();
+        if for_read.len() == 0 {
+            thread::sleep(time::Duration::from_millis(100));
+        }
+        for master_reader in for_read.iter_mut() {
+            match master_reader.read(&mut bytesr) {
+                Ok(size) => {
+                    if size > 0 {
+                        let res = unix_stream.write(&bytesr[0..size]);
+                        if res.is_err() {
+                            break;
+                        }
+                        res.context("Failed at writing the unix stream").unwrap();
+                    } else {
+                        break 'outer;
+                    }
+                }
+                Err(ref e) if e.kind() == ErrorKind::TimedOut => {}
+                Err(_) => break,
             }
-            res.context("Failed at writing the unix stream").unwrap();
-        } else {
-            break;
         }
     });
 
