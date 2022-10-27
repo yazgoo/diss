@@ -64,6 +64,14 @@ When you start a diss new diss session, diss will launch a server, which will:
 1. start a program event thread waiting for events from the child
 1. in the parent, will start waiting for connection from client
 
+Diss will then start a client which will:
+
+1. connect to the server unix domain socket
+1. send terminal size to the server
+1. send a flush request to the server
+1. in a thread, take events from the terminal and forward them via the socket 
+1. read server output as raw bytes and print them in the terminal
+
 When a client connect, the server will:
 
 1. add the client unix stream to the program event thread 
