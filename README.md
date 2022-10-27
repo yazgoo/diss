@@ -5,9 +5,8 @@
 [![Discord](https://img.shields.io/badge/discord--blue?logo=discord)](https://discord.gg/F684Y8rYwZ)
 
 
+**dissociate** `verb`:
 ```
-dissociate
-verb
 1. (especially in abstract contexts) disconnect or separate.
 ```
 
