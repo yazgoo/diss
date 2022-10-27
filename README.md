@@ -54,3 +54,17 @@ diss -l
 ## How does diss work ?
 
 ![diagram](doc/diss-diag.png)
+
+When you start a diss new diss session, diss will launch a server, which will:
+
+1. create and bind to a unix domain socket (located in `~/.config/diss`)
+1. daemonize the process (so it is not a child of current terminal)
+1. fork with ptmx / ptms:
+1. in the child, launch the program you want to use with a pseudo terminal 
+1. start a program event thread waiting for events from the child
+1. in the parent, will start waiting for connection from client
+
+When a client connect, the server will:
+
+1. add the client unix stream to the program event thread 
+1. create a new thread to receive events from the client and forward them to the child
