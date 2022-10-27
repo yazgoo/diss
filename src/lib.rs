@@ -442,7 +442,7 @@ fn session_running(session_name: String) -> anyhow::Result<bool> {
     Ok(Path::new(&session_name_to_socket_path(session_name)?).exists())
 }
 
-pub fn server_client(
+pub fn run(
     session_name: &str,
     command: &[String],
     env: HashMap<String, String>,

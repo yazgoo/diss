@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
 use clap::Parser;
-use diss::{list_sessions, server_client};
+use diss::{list_sessions, run};
 
 #[derive(Parser, Debug)]
 #[clap(author, version, about, long_about = None)]
@@ -30,8 +30,8 @@ fn main() -> anyhow::Result<()> {
         }
     }
     let env = HashMap::new();
-    args.attach_session.as_ref().map(|session_name| {
-        server_client(session_name, &args.command, env, args.escape_key.clone())
-    });
+    args.attach_session
+        .as_ref()
+        .map(|session_name| run(session_name, &args.command, env, args.escape_key.clone()));
     Ok(())
 }
