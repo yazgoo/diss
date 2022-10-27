@@ -6,7 +6,7 @@
 
 
 ```
-dissocate
+dissociate
 verb
 1. (especially in abstract contexts) disconnect or separate.
 ```
