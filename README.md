@@ -1,7 +1,7 @@
 <table>
 <tr>
 <td>
-<img src=diss_logo.png width=100>
+<img src=doc/diss_logo.png width=100>
 </td>
 <td>
 <b>diss</b>ociate (verb):
@@ -50,3 +50,7 @@ diss -l
 ## projects based on diss
 
 - [vmux](https://github.com/yazgoo/vmux), a vim terminal multiplexer
+
+## How does diss work ?
+
+![diagram](doc/diss-diag.png)

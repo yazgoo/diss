@@ -9,7 +9,7 @@ use nix::unistd::ForkResult;
 use pty::fork::*;
 use serde::{Deserialize, Serialize};
 use signal_hook::{
-    consts::{SIGINT, SIGWINCH},
+    consts::{SIGINT, SIGTERM, SIGWINCH},
     iterator::Signals,
 };
 use std::collections::HashMap;
@@ -51,140 +51,14 @@ fn server(
 
     let socket_path2 = socket_path.clone();
 
-    let mut signals = Signals::new(&[SIGINT])?;
-
-    thread::spawn(move || {
-        for _ in signals.forever() {
-            println!("unlink2 {}", &socket_path2);
-            remove_file(&socket_path2).unwrap();
-        }
-    });
-
-    let daemonize = Daemonize::new(); // Redirect stderr to `/tmp/daemon.err`.
+    start_thread_to_cleanup_unix_socket_on_shutdown(socket_path2)?;
 
     let dir = env::current_dir()?;
-    daemonize.working_directory(dir).start()?;
+    Daemonize::new().working_directory(dir).start()?;
 
-    let fork = Fork::from_ptmx().unwrap();
-    match fork {
+    match Fork::from_ptmx()? {
         Fork::Parent(pid, master) => {
-            thread::spawn(move || loop {
-                waitpid(None, None).unwrap();
-                println!("unlink {}", &socket_path);
-                remove_file(&socket_path).unwrap();
-                std::process::exit(0);
-            });
-
-            let master_readers: Arc<RwLock<Vec<UnixStream>>> = Arc::new(RwLock::new(vec![]));
-            let master_readers_2 = master_readers.clone();
-
-            // forked-process > unix stream
-            let mut master_reader = TimeoutReader::new(master, Duration::from_millis(10));
-            let mut bytesr = [0; 1024];
-            thread::spawn(move || loop {
-                let mut should_sleep = false;
-                {
-                    let mut to_remove = None;
-                    match master_reader.read(&mut bytesr) {
-                        // start
-                        Ok(size) => {
-                            // blah
-                            match master_readers.try_write() {
-                                Err(_) => {
-                                    should_sleep = true;
-                                }
-                                Ok(mut for_read) => {
-                                    if for_read.len() == 0 {
-                                        should_sleep = true;
-                                    } else if size > 0 {
-                                        for (i, unix_stream) in for_read.iter_mut().enumerate() {
-                                            let res = unix_stream.write(&bytesr[0..size]);
-                                            if res.is_err() {
-                                                to_remove = Some(i);
-                                                break;
-                                            }
-                                            res.context("Failed at writing the unix stream")
-                                                .unwrap();
-                                        }
-                                    }
-                                    to_remove.map(|i| for_read.remove(i));
-                                }
-                            }
-                        }
-                        Err(ref e) if e.kind() == ErrorKind::TimedOut => {
-                            // should_sleep = true
-                        }
-                        Err(_) => {
-                            break;
-                        } // end
-                    }
-                    // blih
-                }
-                if should_sleep {
-                    thread::sleep(time::Duration::from_millis(10));
-                }
-            });
-
-            // put the server logic in a loop to accept several connections
-            loop {
-                let (unix_stream, _socket_address) = unix_listener
-                    .accept()
-                    .context("Failed at accepting a connection on the unix listener")?;
-
-                let mut reader =
-                    TimeoutReader::new(unix_stream.try_clone()?, Duration::from_millis(10));
-                let mut master2 = master;
-                thread::spawn(move || {
-                    'outer: loop {
-                        match receive_message(&mut reader) {
-                            Ok(message) => {
-                                // start
-                                if message.mode == 0 {
-                                    let us = UnixSize {
-                                        ws_row: message.size.1,
-                                        ws_col: message.size.0,
-                                        ws_xpixel: 0,
-                                        ws_ypixel: 0,
-                                    };
-                                    unsafe {
-                                        libc::ioctl(master2.as_raw_fd(), TIOCSWINSZ, &us);
-                                    };
-                                } else if message.mode == 1 {
-                                    if master2.write(&message.bytes).is_err() {
-                                        break;
-                                    }
-                                } else if message.mode == 2 {
-                                    // detach
-                                } else if message.mode == 3 {
-                                    // redraw
-                                    unsafe {
-                                        libc::kill(pid, SIGWINCH);
-                                    }
-                                }
-                                // end
-                            }
-                            Err(ref e)
-                                if underlying_io_error_kind(e) == Some(ErrorKind::TimedOut) =>
-                            {
-                                // should_sleep = true
-                            }
-                            Err(_) => {
-                                break 'outer;
-                            }
-                        }
-                    }
-                });
-
-                loop {
-                    match master_readers_2.try_write() {
-                        Err(_) => thread::sleep(time::Duration::from_millis(10)),
-                        Ok(mut r) => {
-                            r.push(unix_stream.try_clone().unwrap());
-                            break;
-                        }
-                    }
-                }
-            }
+            run_server_parent_process(pid, master, socket_path, unix_listener)?;
         }
         Fork::Child(_) => {
             Command::new(command).args(args).exec();
@@ -193,6 +67,127 @@ fn server(
     Ok(())
 }
 
+fn run_server_parent_process(
+    pid: i32,
+    master: Master,
+    socket_path: String,
+    unix_listener: UnixListener,
+) -> anyhow::Result<()> {
+    start_thread_to_cleanup_unix_socket_on_process_status_change(socket_path);
+
+    let master_readers: Arc<RwLock<Vec<UnixStream>>> = Arc::new(RwLock::new(vec![]));
+    let master_readers_2 = master_readers.clone();
+
+    start_thread_to_send_data_from_forked_process_to_clients(master, master_readers);
+
+    // put the server logic in a loop to accept several connections
+    loop {
+        let (unix_stream, _socket_address) = unix_listener
+            .accept()
+            .context("Failed at accepting a connection on the unix listener")?;
+
+        start_thread_to_handle_clients_messages(
+            master,
+            pid,
+            TimeoutReader::new(unix_stream.try_clone()?, Duration::from_millis(10)),
+        );
+
+        let mut r = master_readers_2.write().unwrap();
+        r.push(unix_stream.try_clone().unwrap());
+    }
+}
+
+fn start_thread_to_send_data_from_forked_process_to_clients(
+    master: Master,
+    master_readers: Arc<RwLock<Vec<UnixStream>>>,
+) {
+    // forked-process > unix stream
+    let mut master_reader = TimeoutReader::new(master, Duration::from_millis(10));
+    let mut bytesr = [0; 1024];
+    thread::spawn(move || loop {
+        let mut should_sleep = false;
+        {
+            let mut to_remove = None;
+            match master_reader.read(&mut bytesr) {
+                // start
+                Ok(size) => match master_readers.try_write() {
+                    Err(_) => {
+                        should_sleep = true;
+                    }
+                    Ok(mut for_read) => {
+                        if for_read.len() == 0 {
+                            should_sleep = true;
+                        } else if size > 0 {
+                            for (i, unix_stream) in for_read.iter_mut().enumerate() {
+                                let res = unix_stream.write(&bytesr[0..size]);
+                                if res.is_err() {
+                                    to_remove = Some(i);
+                                    break;
+                                }
+                                res.context("Failed at writing the unix stream").unwrap();
+                            }
+                        }
+                        to_remove.map(|i| for_read.remove(i));
+                    }
+                },
+                Err(ref e) if e.kind() == ErrorKind::TimedOut => {
+                    // should_sleep = true
+                }
+                Err(_) => {
+                    break;
+                }
+            }
+        }
+        if should_sleep {
+            thread::sleep(time::Duration::from_millis(10));
+        }
+    });
+}
+
+fn start_thread_to_handle_clients_messages(
+    mut master2: Master,
+    pid: i32,
+    mut reader: TimeoutReader<UnixStream>,
+) {
+    thread::spawn(move || {
+        'outer: loop {
+            match receive_message(&mut reader) {
+                Ok(message) => {
+                    // start
+                    if message.mode == 0 {
+                        let us = UnixSize {
+                            ws_row: message.size.1,
+                            ws_col: message.size.0,
+                            ws_xpixel: 0,
+                            ws_ypixel: 0,
+                        };
+                        unsafe {
+                            libc::ioctl(master2.as_raw_fd(), TIOCSWINSZ, &us);
+                        };
+                    } else if message.mode == 1 {
+                        if master2.write(&message.bytes).is_err() {
+                            break;
+                        }
+                    } else if message.mode == 2 {
+                        // detach
+                    } else if message.mode == 3 {
+                        // redraw
+                        unsafe {
+                            libc::kill(pid, SIGWINCH);
+                        }
+                    }
+                    // end
+                }
+                Err(ref e) if underlying_io_error_kind(e) == Some(ErrorKind::TimedOut) => {
+                    // should_sleep = true
+                }
+                Err(_) => {
+                    break 'outer;
+                }
+            }
+        }
+    });
+}
 #[derive(Debug)]
 #[repr(C)]
 struct UnixSize {
@@ -200,6 +195,26 @@ struct UnixSize {
     ws_col: c_ushort,
     ws_xpixel: c_ushort,
     ws_ypixel: c_ushort,
+}
+
+fn start_thread_to_cleanup_unix_socket_on_process_status_change(socket_path: String) {
+    thread::spawn(move || loop {
+        waitpid(None, None).unwrap();
+        println!("unlink {}", &socket_path);
+        remove_file(&socket_path).unwrap();
+        std::process::exit(0);
+    });
+}
+
+fn start_thread_to_cleanup_unix_socket_on_shutdown(socket_path: String) -> anyhow::Result<()> {
+    let mut signals = Signals::new(&[SIGINT, SIGTERM])?;
+    thread::spawn(move || {
+        for _ in signals.forever() {
+            println!("unlink2 {}", &socket_path);
+            remove_file(&socket_path).unwrap();
+        }
+    });
+    Ok(())
 }
 
 #[derive(Serialize, Deserialize, Debug)]
