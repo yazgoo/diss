@@ -1,12 +1,10 @@
-# diss
-
-<table border=0>
+<table>
 <tr>
 <td>
 <img src=diss.png width=100>
 </td>
 <td>
-dissociate: `verb`
+dissociate (verb):
 <pre>
 1. (especially in abstract contexts) disconnect or separate.
 </pre>
