@@ -4,7 +4,7 @@
 <img src=diss_logo.png width=100>
 </td>
 <td>
-dissociate (verb):
+<b>diss</b>ociate (verb):
 <pre>
 1. (especially in abstract contexts) disconnect or separate.
 </pre>
