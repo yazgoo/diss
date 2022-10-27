@@ -1,6 +1,6 @@
 # diss
 
-![diss](diss.png | width=100)
+<img src=diss.png width=100>
 
 [![Discord](https://img.shields.io/badge/discord--blue?logo=discord)](https://discord.gg/F684Y8rYwZ)
 
