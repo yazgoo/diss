@@ -19,7 +19,7 @@ dissociate (verb):
 Diss:
 
 - dissociates a program from current terminal
-- is like dtach, abduco (think GNU screen without multiplexing)
+- is like [dtach](https://github.com/crigler/dtach), [abduco](https://github.com/martanne/abduco) (think [GNU screen](https://www.gnu.org/software/screen/) or [tmux](https://github.com/tmux/tmux) without multiplexing)
 - is also a rust crate you can easily integrate
 
 ## How do I use diss CLI ?
