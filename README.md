@@ -1,7 +1,7 @@
 <table>
 <tr>
 <td>
-<img src=diss.png width=100>
+<img src=diss_logo.png width=100>
 </td>
 <td>
 dissociate (verb):
