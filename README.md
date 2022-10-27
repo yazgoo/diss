@@ -1,6 +1,6 @@
 # diss
 
-<table>
+<table border=0>
 <tr>
 <td>
 <img src=diss.png width=100>
