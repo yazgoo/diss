@@ -4,8 +4,9 @@ use daemonize::Daemonize;
 use dirs::config_dir;
 use nix::libc;
 use nix::libc::{c_ushort, TIOCSWINSZ};
+use nix::sys::signal::kill;
 use nix::sys::wait::waitpid;
-use nix::unistd::ForkResult;
+use nix::unistd::{ForkResult, Pid};
 use pty::fork::*;
 use serde::{Deserialize, Serialize};
 use signal_hook::{
@@ -86,14 +87,15 @@ fn run_server_parent_process(
             .accept()
             .context("Failed at accepting a connection on the unix listener")?;
 
+        /* add client to the list of clients */
+        let mut r = master_readers_2.write().unwrap();
+        r.push(unix_stream.try_clone().unwrap());
+
         start_thread_to_handle_clients_messages(
             master,
             pid,
             TimeoutReader::new(unix_stream.try_clone()?, Duration::from_millis(10)),
         );
-
-        let mut r = master_readers_2.write().unwrap();
-        r.push(unix_stream.try_clone().unwrap());
     }
 }
 
@@ -102,7 +104,7 @@ fn start_thread_to_send_data_from_forked_process_to_clients(
     master_readers: Arc<RwLock<Vec<UnixStream>>>,
 ) {
     // forked-process > unix stream
-    let mut master_reader = TimeoutReader::new(master, Duration::from_millis(10));
+    let mut master_reader = master;
     let mut bytesr = [0; 1024];
     thread::spawn(move || loop {
         let mut should_sleep = false;
@@ -122,17 +124,12 @@ fn start_thread_to_send_data_from_forked_process_to_clients(
                                 let res = unix_stream.write(&bytesr[0..size]);
                                 if res.is_err() {
                                     to_remove = Some(i);
-                                    break;
                                 }
-                                res.context("Failed at writing the unix stream").unwrap();
                             }
                         }
                         to_remove.map(|i| for_read.remove(i));
                     }
                 },
-                Err(ref e) if e.kind() == ErrorKind::TimedOut => {
-                    // should_sleep = true
-                }
                 Err(_) => {
                     break;
                 }
@@ -172,9 +169,7 @@ fn start_thread_to_handle_clients_messages(
                         // detach
                     } else if message.mode == 3 {
                         // redraw
-                        unsafe {
-                            libc::kill(pid, SIGWINCH);
-                        }
+                        let _ = kill(Pid::from_raw(pid), nix::sys::signal::SIGWINCH);
                     }
                     // end
                 }
