@@ -265,7 +265,7 @@ fn escape_key_to_byte(escape_key: Option<String>) -> u8 {
                 .map(|i| i as u8 + 1)
                 .unwrap_or(1)
         })
-        .unwrap_or(1)
+        .unwrap_or(7) /* default escape key == g */
 }
 
 fn client(socket_path: String, escape_key: Option<String>) -> anyhow::Result<()> {
