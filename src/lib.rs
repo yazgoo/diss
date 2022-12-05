@@ -1,7 +1,6 @@
 use bincode::{DefaultOptions, Options};
 use core::time;
 use daemonize::Daemonize;
-use dirs::config_dir;
 use nix::libc;
 use nix::libc::{c_ushort, TIOCSWINSZ};
 use nix::sys::signal::kill;
@@ -278,10 +277,10 @@ fn client(socket_path: String, escape_key: Option<String>) -> anyhow::Result<()>
 
 fn write_request_and_shutdown(unix_stream: &mut UnixStream, escape_code: u8) -> anyhow::Result<()> {
     let mut _stdout = stdout().into_raw_mode()?;
-    let mut stdin = io::stdin();
+    let mut stdin = TimeoutReader::new(io::stdin(), Duration::from_millis(50));
 
     let mut unix_stream_reader =
-        TimeoutReader::new(unix_stream.try_clone()?, Duration::from_millis(200));
+        TimeoutReader::new(unix_stream.try_clone()?, Duration::from_millis(50));
 
     print!("{}[2J", 27 as char);
     let mut _stdout2 = stdout();
@@ -291,9 +290,6 @@ fn write_request_and_shutdown(unix_stream: &mut UnixStream, escape_code: u8) -> 
     thread::spawn(move || {
         let mut bytes = [0; 255];
         loop {
-            if done_in.load(Ordering::Relaxed) {
-                break;
-            }
             match unix_stream_reader.read(&mut bytes) {
                 Ok(_size) => {
                     if _size > 0 {
@@ -302,10 +298,16 @@ fn write_request_and_shutdown(unix_stream: &mut UnixStream, escape_code: u8) -> 
                             .context("failed at writing stdin")
                             .unwrap();
                         _stdout2.flush().unwrap();
+                    } else {
+                        done_in.store(true, Ordering::Relaxed);
+                        break;
                     }
                 }
                 Err(ref e) if e.kind() == ErrorKind::TimedOut => {}
-                Err(_) => break,
+                Err(_) => {
+                    done_in.store(true, Ordering::Relaxed);
+                    break;
+                }
             }
         }
     });
@@ -356,48 +358,53 @@ fn write_request_and_shutdown(unix_stream: &mut UnixStream, escape_code: u8) -> 
     let mut unix_stream_stdin = unix_stream.try_clone()?;
 
     let mut bytesr = [0; 1024];
+    let done_stdin = done.clone();
     let t2 = thread::spawn(move || 'outer: loop {
-        let _size = stdin
-            .read(&mut bytesr)
-            .context("failed at reading stdout")
-            .unwrap();
-        if _size > 0 {
-            if _size == 1 && bytesr[0] == escape_code {
-                // detach
-                send_message(
-                    &mut unix_stream_stdin,
-                    &Message {
-                        mode: 2,
-                        size: (0, 0),
-                        bytes: vec![bytesr[0]],
-                    },
-                )
-                .context("Failed at writing the unix stream")
-                .unwrap();
-                unix_stream_stdin
-                    .shutdown(std::net::Shutdown::Write)
-                    .context("Could not shutdown writing on the stream")
-                    .unwrap();
+        match stdin.read(&mut bytesr) {
+            Ok(_size) => {
+                if _size > 0 {
+                    if _size == 1 && bytesr[0] == escape_code {
+                        // detach
+                        send_message(
+                            &mut unix_stream_stdin,
+                            &Message {
+                                mode: 2,
+                                size: (0, 0),
+                                bytes: vec![bytesr[0]],
+                            },
+                        )
+                        .context("Failed at writing the unix stream")
+                        .unwrap();
+                        unix_stream_stdin
+                            .shutdown(std::net::Shutdown::Write)
+                            .context("Could not shutdown writing on the stream")
+                            .unwrap();
+                    }
+                    let res = send_message(
+                        &mut unix_stream_stdin,
+                        &Message {
+                            mode: 1,
+                            size: (0, 0),
+                            bytes: bytesr[.._size].into(),
+                        },
+                    );
+                    if res.is_err() {
+                        break 'outer;
+                    }
+                }
             }
-            let res = send_message(
-                &mut unix_stream_stdin,
-                &Message {
-                    mode: 1,
-                    size: (0, 0),
-                    bytes: bytesr[.._size].into(),
-                },
-            );
-            if res.is_err() {
-                break 'outer;
+            Err(ref e) if e.kind() == ErrorKind::TimedOut => {
+                if done_stdin.load(Ordering::Relaxed) {
+                    break 'outer;
+                }
             }
+            Err(_) => break,
         }
     });
 
     t2.join().unwrap();
 
     _stdout.suspend_raw_mode()?;
-
-    done.store(true, Ordering::Relaxed);
 
     unix_stream
         .shutdown(std::net::Shutdown::Write)
@@ -419,10 +426,11 @@ impl fmt::Display for NoConfigDir {
 }
 
 fn conf_dir() -> anyhow::Result<String> {
-    let dir = config_dir().ok_or_else(|| anyhow::anyhow!("config dir not found"))?;
+    let dir = std::env::temp_dir();
     let crate_name = option_env!("CARGO_PKG_NAME").unwrap_or("rda");
     let dir_str = dir.as_path().display();
-    let confdir = format!("{}/{}", dir_str, crate_name);
+    let user = whoami::username();
+    let confdir = format!("{}/{}.{}", dir_str, user, crate_name);
     if !Path::new(&confdir).exists() {
         fs::create_dir(&confdir)?;
     }

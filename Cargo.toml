@@ -24,3 +24,4 @@ clap = { version = "3.2", features = ["derive"] }
 dirs = "4"
 timeout-readwrite = "0.3"
 rand = "0.8"
+whoami = "1.2"
