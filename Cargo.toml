@@ -14,7 +14,7 @@ edition = "2018"
 [dependencies]
 nix = "0.25"
 anyhow = "1.0"
-termion = "1"
+termion = "2"
 pty = "0.2"
 bincode = "1.0"
 serde = { version = "1.0", features = ["derive"] }
