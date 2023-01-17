@@ -166,6 +166,8 @@ fn start_thread_to_handle_clients_messages(
                         }
                     } else if message.mode == 2 {
                         // detach
+                        message.bytes.into()
+                        break;
                     } else if message.mode == 3 {
                         // redraw
                         let _ = kill(Pid::from_raw(pid), nix::sys::signal::SIGWINCH);
@@ -405,11 +407,7 @@ fn write_request_and_shutdown(unix_stream: &mut UnixStream, escape_code: u8) -> 
     t2.join().unwrap();
 
     unix_stream
-        .shutdown(std::net::Shutdown::Write)
-        .context("Could not shutdown writing on the stream")?;
-
-    unix_stream
-        .shutdown(std::net::Shutdown::Read)
+        .shutdown(std::net::Shutdown::Both)
         .context("Could not shutdown writing on the stream")?;
 
     Ok(())
@@ -456,6 +454,19 @@ pub fn list_sessions() -> anyhow::Result<Vec<String>> {
 
 fn session_running(session_name: String) -> anyhow::Result<bool> {
     Ok(Path::new(&session_name_to_socket_path(session_name)?).exists())
+}
+
+pub fn detach(session_name: &str, client_id: &str) -> anyhow::Result<()> {
+    let socket_path = session_name_to_socket_path(session_name.to_string())?;
+    let mut unix_stream = UnixStream::connect(socket_path).context("Could not create stream")?;
+    send_message(
+        &mut unix_stream,
+        &Message {
+            mode: 2, // <- detach
+            size: (0, 0),
+            bytes: client_id.bytes().collect(),
+        },
+    )
 }
 
 pub fn run(
