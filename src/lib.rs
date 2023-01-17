@@ -404,9 +404,11 @@ fn write_request_and_shutdown(unix_stream: &mut UnixStream, escape_code: u8) -> 
 
     t2.join().unwrap();
 
+    let _ = unix_stream.shutdown(std::net::Shutdown::Write);
+
     unix_stream
-        .shutdown(std::net::Shutdown::Both)
-        .context("Could not shutdown writing on the stream")?;
+        .shutdown(std::net::Shutdown::Read)
+        .context("Could not shutdown reading on the stream")?;
 
     Ok(())
 }
