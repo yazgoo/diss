@@ -406,9 +406,7 @@ fn write_request_and_shutdown(unix_stream: &mut UnixStream, escape_code: u8) -> 
 
     let _ = unix_stream.shutdown(std::net::Shutdown::Write);
 
-    unix_stream
-        .shutdown(std::net::Shutdown::Read)
-        .context("Could not shutdown reading on the stream")?;
+    let _ = unix_stream.shutdown(std::net::Shutdown::Read);
 
     Ok(())
 }
