@@ -29,23 +29,34 @@ use termion::raw::IntoRawMode;
 use timeout_readwrite::TimeoutReader;
 
 use anyhow::Context;
+use log::{debug, info};
+use log_derive::{logfn, logfn_inputs};
 
+#[logfn(Debug)]
+#[logfn_inputs(Debug)]
 fn server(
     socket_path: String,
     command: String,
     args: Vec<String>,
     env: HashMap<String, String>,
 ) -> anyhow::Result<()> {
-    env.get("PWD").map(env::set_current_dir);
+    env.get("PWD")
+        .map(|d| {
+            debug!("current dir: {}", d);
+            d
+        })
+        .map(env::set_current_dir);
     for (k, v) in env {
+        debug!("env var: {} = {}", k, v);
         env::set_var(k, v);
     }
     if std::fs::metadata(&socket_path).is_ok() {
-        println!("A socket is already present. Deleting...");
+        info!("A socket is already present. Deleting...");
         std::fs::remove_file(&socket_path)
             .with_context(|| format!("could not delete previous socket at {:?}", socket_path))?;
     }
 
+    debug!("binding to {:?}", socket_path);
     let unix_listener =
         UnixListener::bind(&socket_path).context("Could not create the unix socket")?;
 
@@ -67,6 +78,7 @@ fn server(
     Ok(())
 }
 
+#[logfn_inputs(Debug)]
 fn run_server_parent_process(
     pid: i32,
     master: Master,
@@ -98,6 +110,8 @@ fn run_server_parent_process(
     }
 }
 
+#[logfn(Debug)]
+#[logfn_inputs(Debug)]
 fn start_thread_to_send_data_from_forked_process_to_clients(
     master: Master,
     master_readers: Arc<RwLock<Vec<UnixStream>>>,
@@ -140,6 +154,7 @@ fn start_thread_to_send_data_from_forked_process_to_clients(
     });
 }
 
+#[logfn(Debug)]
 fn start_thread_to_handle_clients_messages(
     mut master2: Master,
     pid: i32,
@@ -191,6 +206,8 @@ struct UnixSize {
     ws_ypixel: c_ushort,
 }
 
+#[logfn(Debug)]
+#[logfn_inputs(Debug)]
 fn start_thread_to_cleanup_unix_socket_on_process_status_change(socket_path: String) {
     thread::spawn(move || loop {
         waitpid(None, None).unwrap();
@@ -200,6 +217,8 @@ fn start_thread_to_cleanup_unix_socket_on_process_status_change(socket_path: Str
     });
 }
 
+#[logfn(Debug)]
+#[logfn_inputs(Debug)]
 fn start_thread_to_cleanup_unix_socket_on_shutdown(socket_path: String) -> anyhow::Result<()> {
     let mut signals = Signals::new(&[SIGINT, SIGTERM])?;
     thread::spawn(move || {
@@ -218,6 +237,8 @@ struct Message {
     bytes: Vec<u8>,
 }
 
+#[logfn(Debug)]
+#[logfn_inputs(Debug)]
 fn send_message(unix_stream: &mut UnixStream, message: &Message) -> anyhow::Result<()> {
     let encoded = DefaultOptions::new()
         .with_varint_encoding()
@@ -226,6 +247,7 @@ fn send_message(unix_stream: &mut UnixStream, message: &Message) -> anyhow::Resu
     unix_stream.write_all(&encoded[..]).map_err(|x| x.into())
 }
 
+#[logfn(Debug)]
 fn receive_message(unix_stream_reader: &mut TimeoutReader<UnixStream>) -> anyhow::Result<Message> {
     let mut len_array = vec![0; 1];
     unix_stream_reader.read_exact(&mut len_array)?;
@@ -237,6 +259,8 @@ fn receive_message(unix_stream_reader: &mut TimeoutReader<UnixStream>) -> anyhow
         .map_err(|x| x.into())
 }
 
+#[logfn(Debug)]
+#[logfn_inputs(Debug)]
 pub fn underlying_io_error_kind(error: &anyhow::Error) -> Option<io::ErrorKind> {
     for cause in error.chain() {
         if let Some(io_error) = cause.downcast_ref::<io::Error>() {
@@ -246,6 +270,8 @@ pub fn underlying_io_error_kind(error: &anyhow::Error) -> Option<io::ErrorKind> 
     None
 }
 
+#[logfn(Debug)]
+#[logfn_inputs(Debug)]
 fn escape_key_to_byte(escape_key: Option<String>) -> u8 {
     let allowed_keys = vec![
         "a".to_string(),
@@ -267,6 +293,8 @@ fn escape_key_to_byte(escape_key: Option<String>) -> u8 {
         .unwrap_or(7) /* default escape key == g */
 }
 
+#[logfn(Debug)]
+#[logfn_inputs(Debug)]
 fn client(socket_path: String, escape_key: Option<String>) -> anyhow::Result<()> {
     let mut unix_stream = UnixStream::connect(socket_path).context("Could not create stream")?;
 
@@ -275,6 +303,8 @@ fn client(socket_path: String, escape_key: Option<String>) -> anyhow::Result<()>
     Ok(())
 }
 
+#[logfn(Debug)]
+#[logfn_inputs(Debug)]
 fn write_request_and_shutdown(unix_stream: &mut UnixStream, escape_code: u8) -> anyhow::Result<()> {
     let mut _stdout = stdout().into_raw_mode()?;
     let mut stdin = TimeoutReader::new(io::stdin(), Duration::from_millis(50));
@@ -419,6 +449,8 @@ impl fmt::Display for NoConfigDir {
     }
 }
 
+#[logfn(Debug)]
+#[logfn_inputs(Debug)]
 fn conf_dir() -> anyhow::Result<String> {
     let dir = std::env::temp_dir();
     let crate_name = option_env!("CARGO_PKG_NAME").unwrap_or("rda");
@@ -431,11 +463,15 @@ fn conf_dir() -> anyhow::Result<String> {
     Ok(confdir)
 }
 
+#[logfn(Debug)]
+#[logfn_inputs(Debug)]
 fn session_name_to_socket_path(session_name: String) -> anyhow::Result<String> {
     let confdir = conf_dir()?;
     Ok(format!("{}/{}", confdir, session_name))
 }
 
+#[logfn(Debug)]
+#[logfn_inputs(Debug)]
 pub fn list_sessions() -> anyhow::Result<Vec<String>> {
     let paths = fs::read_dir(conf_dir()?)?;
     let res = paths
@@ -450,10 +486,14 @@ pub fn list_sessions() -> anyhow::Result<Vec<String>> {
     Ok(res)
 }
 
+#[logfn(Debug)]
+#[logfn_inputs(Debug)]
 fn session_running(session_name: String) -> anyhow::Result<bool> {
     Ok(Path::new(&session_name_to_socket_path(session_name)?).exists())
 }
 
+#[logfn(Debug)]
+#[logfn_inputs(Debug)]
 pub fn run(
     session_name: &str,
     command: &[String],
