@@ -210,8 +210,11 @@ struct UnixSize {
 #[logfn_inputs(Debug)]
 fn start_thread_to_cleanup_unix_socket_on_process_status_change(socket_path: String) {
     thread::spawn(move || loop {
-        waitpid(None, None).unwrap();
-        println!("unlink {}", &socket_path);
+        let res = waitpid(None, None).unwrap();
+        debug!(
+            "start_thread_to_cleanup_unix_socket_on_process_status_change: unlink {} {:?}",
+            &socket_path, res
+        );
         remove_file(&socket_path).unwrap();
         std::process::exit(0);
     });
@@ -222,7 +225,11 @@ fn start_thread_to_cleanup_unix_socket_on_process_status_change(socket_path: Str
 fn start_thread_to_cleanup_unix_socket_on_shutdown(socket_path: String) -> anyhow::Result<()> {
     let mut signals = Signals::new(&[SIGINT, SIGTERM])?;
     thread::spawn(move || {
-        for _ in signals.forever() {
+        for signal in signals.forever() {
+            debug!(
+                "start_thread_to_cleanup_unix_socket_on_shutdown: unlink {}, signal: {}",
+                &socket_path, signal
+            );
             println!("unlink2 {}", &socket_path);
             remove_file(&socket_path).unwrap();
         }
