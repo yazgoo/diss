@@ -10,6 +10,10 @@ struct Args {
     #[clap(short, long, value_parser)]
     list: bool,
 
+    // debug
+    #[clap(short, long, value_parser)]
+    debug: bool,
+
     // escape key
     #[clap(short, long, value_parser)]
     escape_key: Option<String>,
@@ -22,8 +26,27 @@ struct Args {
     command: Vec<String>,
 }
 
+fn setup_logger() -> Result<(), fern::InitError> {
+    fern::Dispatch::new()
+        .format(|out, message, record| {
+            out.finish(format_args!(
+                "[{}][{}] {}",
+                record.target(),
+                record.level(),
+                message
+            ))
+        })
+        .level(log::LevelFilter::Debug)
+        .chain(fern::log_file("diss.log")?)
+        .apply()?;
+    Ok(())
+}
+
 fn main() -> anyhow::Result<()> {
     let args = Args::parse();
+    if args.debug {
+        setup_logger()?;
+    }
     if args.list {
         for session in list_sessions()? {
             println!("{}", session);

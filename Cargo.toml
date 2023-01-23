@@ -1,6 +1,6 @@
 [package]
 name = "diss"
-version = "0.2.4"
+version = "0.2.5"
 authors = ["yazgoo"]
 description = "dissociate program from your terminal"
 documentation = "https://docs.rs/diss"
@@ -27,3 +27,4 @@ rand = "0.8"
 whoami = "1.2"
 log = "0.4"
 log-derive = "0.4"
+fern = "0.6"
