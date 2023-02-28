@@ -223,7 +223,7 @@ fn start_thread_to_cleanup_unix_socket_on_process_status_change(socket_path: Str
 #[logfn(Debug)]
 #[logfn_inputs(Debug)]
 fn start_thread_to_cleanup_unix_socket_on_shutdown(socket_path: String) -> anyhow::Result<()> {
-    let mut signals = Signals::new(&[SIGINT, SIGTERM])?;
+    let mut signals = Signals::new([SIGINT, SIGTERM])?;
     thread::spawn(move || {
         for signal in signals.forever() {
             debug!(
@@ -349,7 +349,7 @@ fn write_request_and_shutdown(unix_stream: &mut UnixStream, escape_code: u8) -> 
         }
     });
 
-    let mut signals = Signals::new(&[SIGWINCH])?;
+    let mut signals = Signals::new([SIGWINCH])?;
     let mut unix_stream_resize = unix_stream.try_clone()?;
 
     thread::spawn(move || {
@@ -395,7 +395,7 @@ fn write_request_and_shutdown(unix_stream: &mut UnixStream, escape_code: u8) -> 
     let mut unix_stream_stdin = unix_stream.try_clone()?;
 
     let mut bytesr = [0; 1024];
-    let done_stdin = done.clone();
+    let done_stdin = done;
     let t2 = thread::spawn(move || 'outer: loop {
         match stdin.read(&mut bytesr) {
             Ok(_size) => {
