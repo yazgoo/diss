@@ -183,7 +183,8 @@ fn start_thread_to_handle_clients_messages(
                         // detach
                     } else if message.mode == 3 {
                         // redraw
-                        let _ = kill(Pid::from_raw(pid), nix::sys::signal::SIGWINCH);
+                        let r = kill(Pid::from_raw(pid), nix::sys::signal::SIGWINCH);
+                        debug!("redraw result: {:?}", r);
                     }
                     // end
                 }
@@ -254,7 +255,6 @@ fn send_message(unix_stream: &mut UnixStream, message: &Message) -> anyhow::Resu
     unix_stream.write_all(&encoded[..]).map_err(|x| x.into())
 }
 
-#[logfn(Debug)]
 fn receive_message(unix_stream_reader: &mut TimeoutReader<UnixStream>) -> anyhow::Result<Message> {
     let mut len_array = vec![0; 1];
     unix_stream_reader.read_exact(&mut len_array)?;
@@ -266,8 +266,6 @@ fn receive_message(unix_stream_reader: &mut TimeoutReader<UnixStream>) -> anyhow
         .map_err(|x| x.into())
 }
 
-#[logfn(Debug)]
-#[logfn_inputs(Debug)]
 pub fn underlying_io_error_kind(error: &anyhow::Error) -> Option<io::ErrorKind> {
     for cause in error.chain() {
         if let Some(io_error) = cause.downcast_ref::<io::Error>() {
@@ -308,6 +306,35 @@ fn client(socket_path: String, escape_key: Option<String>) -> anyhow::Result<()>
     write_request_and_shutdown(&mut unix_stream, escape_key_to_byte(escape_key))?;
     // read_from_stream(&mut unix_stream)?;
     Ok(())
+}
+
+#[logfn(Debug)]
+#[logfn_inputs(Debug)]
+fn send_terminal_size(unix_stream: &mut UnixStream) -> anyhow::Result<()> {
+    send_message(
+        unix_stream,
+        &Message {
+            mode: 0,
+            size: termion::terminal_size()?,
+            bytes: vec![0],
+        },
+    )
+    .context("Failed at writing the unix stream when sending terminal size")
+}
+
+#[logfn(Debug)]
+#[logfn_inputs(Debug)]
+fn send_refresh_terminal_code(unix_stream: &mut UnixStream) -> anyhow::Result<()> {
+    let ctrl_l = vec![12];
+    send_message(
+        unix_stream,
+        &Message {
+            mode: 1,
+            size: (0, 0),
+            bytes: ctrl_l,
+        },
+    )
+    .context("Failed at writing the unix stream when sending refresh terminal code")
 }
 
 #[logfn(Debug)]
@@ -370,28 +397,9 @@ fn write_request_and_shutdown(unix_stream: &mut UnixStream, escape_code: u8) -> 
         }
     });
 
-    // send terminal size
-    send_message(
-        unix_stream,
-        &Message {
-            mode: 0,
-            size: termion::terminal_size()?,
-            bytes: vec![0],
-        },
-    )
-    .context("Failed at writing the unix stream")?;
+    send_terminal_size(unix_stream)?;
+    send_refresh_terminal_code(unix_stream)?;
 
-    unix_stream.flush()?;
-    // send CTRL+L to force redraw
-    send_message(
-        unix_stream,
-        &Message {
-            mode: 3,
-            size: (0, 0),
-            bytes: vec![12],
-        },
-    )
-    .context("Failed at writing the unix stream")?;
     let mut unix_stream_stdin = unix_stream.try_clone()?;
 
     let mut bytesr = [0; 1024];
@@ -530,4 +538,44 @@ pub fn run(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod test {
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    use super::*;
+
+    #[test]
+    fn test_list_sessions() {
+        let res = list_sessions();
+        println!("res : {:?}", res);
+        // TODO find a way to test pty even in github actions
+        if std::env::var("GITHUB_ACTION").is_err() {
+            assert!(res.is_ok());
+        }
+    }
+
+    #[test]
+    fn test_new_session_ending_directly() {
+        let start = SystemTime::now();
+        let session_name = format!(
+            "diss-test-ending-{:?}",
+            start
+                .duration_since(UNIX_EPOCH)
+                .expect("should not happen")
+                .as_millis()
+        );
+        let res = run(
+            &session_name,
+            &["sleep".into(), "0.2".into()],
+            HashMap::new(),
+            Some("a".into()),
+        );
+        println!("res : {} {:?}", session_name, res);
+        // TODO find a way to test pty even in github actions
+        if std::env::var("GITHUB_ACTION").is_err() {
+            assert!(res.is_ok());
+        }
+    }
 }
