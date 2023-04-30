@@ -172,8 +172,10 @@ fn start_thread_to_handle_clients_messages(
                             ws_xpixel: 0,
                             ws_ypixel: 0,
                         };
+                        debug!("send TIOCSWINSZ {:?}", us);
                         unsafe {
-                            libc::ioctl(master2.as_raw_fd(), TIOCSWINSZ, &us);
+                            let r = libc::ioctl(master2.as_raw_fd(), TIOCSWINSZ, &us);
+                            debug!("TIOCSWINSZ result: {:?}", r);
                         };
                     } else if message.mode == 1 {
                         if master2.write(&message.bytes).is_err() {
@@ -183,6 +185,7 @@ fn start_thread_to_handle_clients_messages(
                         // detach
                     } else if message.mode == 3 {
                         // redraw
+                        debug!("send kill for pid: {:?}", pid);
                         let r = kill(Pid::from_raw(pid), nix::sys::signal::SIGWINCH);
                         debug!("redraw result: {:?}", r);
                     }
@@ -303,19 +306,20 @@ fn escape_key_to_byte(escape_key: Option<String>) -> u8 {
 fn client(socket_path: String, escape_key: Option<String>) -> anyhow::Result<()> {
     let mut unix_stream = UnixStream::connect(socket_path).context("Could not create stream")?;
 
-    write_request_and_shutdown(&mut unix_stream, escape_key_to_byte(escape_key))?;
+    run_client(&mut unix_stream, escape_key_to_byte(escape_key))?;
     // read_from_stream(&mut unix_stream)?;
     Ok(())
 }
 
 #[logfn(Debug)]
 #[logfn_inputs(Debug)]
-fn send_terminal_size(unix_stream: &mut UnixStream) -> anyhow::Result<()> {
+fn send_terminal_size(unix_stream: &mut UnixStream, delta: u16) -> anyhow::Result<()> {
+    let (s1, s2) = termion::terminal_size()?;
     send_message(
         unix_stream,
         &Message {
             mode: 0,
-            size: termion::terminal_size()?,
+            size: (s1 - delta, s2 - delta),
             bytes: vec![0],
         },
     )
@@ -339,7 +343,30 @@ fn send_refresh_terminal_code(unix_stream: &mut UnixStream) -> anyhow::Result<()
 
 #[logfn(Debug)]
 #[logfn_inputs(Debug)]
-fn write_request_and_shutdown(unix_stream: &mut UnixStream, escape_code: u8) -> anyhow::Result<()> {
+fn send_refresh_message(unix_stream: &mut UnixStream) -> anyhow::Result<()> {
+    let ctrl_l = vec![12];
+    send_message(
+        unix_stream,
+        &Message {
+            mode: 3,
+            size: (0, 0),
+            bytes: ctrl_l,
+        },
+    )
+    .context("Failed at writing the unix stream when sending refresh terminal code")
+}
+
+#[logfn(Debug)]
+#[logfn_inputs(Debug)]
+fn send_terminal_size_and_refresh_code(unix_stream: &mut UnixStream) -> anyhow::Result<()> {
+    send_terminal_size(unix_stream, 0)?;
+    send_refresh_message(unix_stream)
+    //send_refresh_terminal_code(unix_stream)
+}
+
+#[logfn(Debug)]
+#[logfn_inputs(Debug)]
+fn run_client(unix_stream: &mut UnixStream, escape_code: u8) -> anyhow::Result<()> {
     let mut _stdout = stdout().into_raw_mode()?;
     let mut stdin = TimeoutReader::new(io::stdin(), Duration::from_millis(50));
 
@@ -382,23 +409,14 @@ fn write_request_and_shutdown(unix_stream: &mut UnixStream, escape_code: u8) -> 
     thread::spawn(move || {
         for sig in signals.forever() {
             if sig == SIGWINCH
-                && send_message(
-                    &mut unix_stream_resize,
-                    &Message {
-                        mode: 0,
-                        size: termion::terminal_size().unwrap(),
-                        bytes: vec![0],
-                    },
-                )
-                .is_err()
+                && send_terminal_size_and_refresh_code(&mut unix_stream_resize).is_err()
             {
                 break;
             }
         }
     });
 
-    send_terminal_size(unix_stream)?;
-    send_refresh_terminal_code(unix_stream)?;
+    send_terminal_size_and_refresh_code(unix_stream)?;
 
     let mut unix_stream_stdin = unix_stream.try_clone()?;
 
