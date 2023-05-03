@@ -153,6 +153,20 @@ fn start_thread_to_send_data_from_forked_process_to_clients(
         }
     });
 }
+#[logfn(Debug)]
+fn send_tiowinsz(ws_row: u16, ws_col: u16, master2: Master) {
+    let us = UnixSize {
+        ws_row,
+        ws_col,
+        ws_xpixel: 0,
+        ws_ypixel: 0,
+    };
+    debug!("send TIOCSWINSZ {:?}", us);
+    unsafe {
+        let r = libc::ioctl(master2.as_raw_fd(), TIOCSWINSZ, &us);
+        debug!("TIOCSWINSZ result: {:?}", r);
+    };
+}
 
 #[logfn(Debug)]
 fn start_thread_to_handle_clients_messages(
@@ -164,32 +178,20 @@ fn start_thread_to_handle_clients_messages(
         'outer: loop {
             match receive_message(&mut reader) {
                 Ok(message) => {
-                    // start
-                    if message.mode == 0 {
-                        let us = UnixSize {
-                            ws_row: message.size.1,
-                            ws_col: message.size.0,
-                            ws_xpixel: 0,
-                            ws_ypixel: 0,
-                        };
-                        debug!("send TIOCSWINSZ {:?}", us);
-                        unsafe {
-                            let r = libc::ioctl(master2.as_raw_fd(), TIOCSWINSZ, &us);
-                            debug!("TIOCSWINSZ result: {:?}", r);
-                        };
-                    } else if message.mode == 1 {
+                    if message.mode == Mode::TermSize {
+                        send_tiowinsz(message.size.1, message.size.0, master2)
+                    } else if message.mode == Mode::Write {
                         if master2.write(&message.bytes).is_err() {
                             break;
                         }
-                    } else if message.mode == 2 {
-                        // detach
-                    } else if message.mode == 3 {
-                        // redraw
+                    } else if message.mode == Mode::Detach {
+                        // see send_detach_message() for explanation
+                        send_tiowinsz(message.size.1, message.size.0, master2)
+                    } else if message.mode == Mode::Redraw {
                         debug!("send kill for pid: {:?}", pid);
                         let r = kill(Pid::from_raw(pid), nix::sys::signal::SIGWINCH);
                         debug!("redraw result: {:?}", r);
                     }
-                    // end
                 }
                 Err(ref e) if underlying_io_error_kind(e) == Some(ErrorKind::TimedOut) => {
                     // should_sleep = true
@@ -241,9 +243,17 @@ fn start_thread_to_cleanup_unix_socket_on_shutdown(socket_path: String) -> anyho
     Ok(())
 }
 
+#[derive(Serialize, Deserialize, Debug, PartialEq)]
+enum Mode {
+    TermSize,
+    Write,
+    Detach,
+    Redraw,
+}
+
 #[derive(Serialize, Deserialize, Debug)]
 struct Message {
-    mode: u8,
+    mode: Mode,
     size: (u16, u16),
     bytes: Vec<u8>,
 }
@@ -313,12 +323,12 @@ fn client(socket_path: String, escape_key: Option<String>) -> anyhow::Result<()>
 
 #[logfn(Debug)]
 #[logfn_inputs(Debug)]
-fn send_terminal_size(unix_stream: &mut UnixStream, delta: u16) -> anyhow::Result<()> {
+fn send_terminal_size(unix_stream: &mut UnixStream, delta: u16, mode: Mode) -> anyhow::Result<()> {
     let (s1, s2) = termion::terminal_size()?;
     send_message(
         unix_stream,
         &Message {
-            mode: 0,
+            mode,
             size: (s1 - delta, s2 - delta),
             bytes: vec![0],
         },
@@ -333,7 +343,7 @@ fn send_refresh_terminal_code(unix_stream: &mut UnixStream) -> anyhow::Result<()
     send_message(
         unix_stream,
         &Message {
-            mode: 1,
+            mode: Mode::Write,
             size: (0, 0),
             bytes: ctrl_l,
         },
@@ -348,7 +358,7 @@ fn send_refresh_message(unix_stream: &mut UnixStream) -> anyhow::Result<()> {
     send_message(
         unix_stream,
         &Message {
-            mode: 3,
+            mode: Mode::Redraw,
             size: (0, 0),
             bytes: ctrl_l,
         },
@@ -359,9 +369,22 @@ fn send_refresh_message(unix_stream: &mut UnixStream) -> anyhow::Result<()> {
 #[logfn(Debug)]
 #[logfn_inputs(Debug)]
 fn send_terminal_size_and_refresh_code(unix_stream: &mut UnixStream) -> anyhow::Result<()> {
-    send_terminal_size(unix_stream, 0)?;
+    send_terminal_size(unix_stream, 0, Mode::TermSize)?;
     send_refresh_message(unix_stream)
     //send_refresh_terminal_code(unix_stream)
+}
+
+fn send_detach_message(unix_stream_stdin: &mut UnixStream) -> anyhow::Result<()> {
+    // bypass
+    // https://github.com/neovim/neovim/issues/23411
+    // when detaching, also sending the terminal size minus one.
+    // when we reattach we will send the actual size and send a redraw message,
+    // so that neovim actually takes SIGWINCH into account
+    send_terminal_size(unix_stream_stdin, 1, Mode::Detach)
+        .context("Failed at writing the unix stream")?;
+    unix_stream_stdin
+        .shutdown(std::net::Shutdown::Write)
+        .context("Could not shutdown writing on the stream")
 }
 
 #[logfn(Debug)]
@@ -427,26 +450,12 @@ fn run_client(unix_stream: &mut UnixStream, escape_code: u8) -> anyhow::Result<(
             Ok(_size) => {
                 if _size > 0 {
                     if _size == 1 && bytesr[0] == escape_code {
-                        // detach
-                        send_message(
-                            &mut unix_stream_stdin,
-                            &Message {
-                                mode: 2,
-                                size: (0, 0),
-                                bytes: vec![bytesr[0]],
-                            },
-                        )
-                        .context("Failed at writing the unix stream")
-                        .unwrap();
-                        unix_stream_stdin
-                            .shutdown(std::net::Shutdown::Write)
-                            .context("Could not shutdown writing on the stream")
-                            .unwrap();
+                        send_detach_message(&mut unix_stream_stdin).unwrap();
                     }
                     let res = send_message(
                         &mut unix_stream_stdin,
                         &Message {
-                            mode: 1,
+                            mode: Mode::Write,
                             size: (0, 0),
                             bytes: bytesr[.._size].into(),
                         },
