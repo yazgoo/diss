@@ -15,7 +15,7 @@ edition = "2018"
 nix = "0.25"
 anyhow = "1.0"
 termion = "2"
-pty = "0.2"
+pty-process = "0.3"
 bincode = "1.0"
 serde = { version = "1.0", features = ["derive"] }
 signal-hook = "0.3" 

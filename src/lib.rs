@@ -1,12 +1,11 @@
 use bincode::{DefaultOptions, Options};
 use core::time;
 use daemonize::Daemonize;
-use nix::libc;
-use nix::libc::{c_ushort, TIOCSWINSZ};
+use nix::libc::c_ushort;
 use nix::sys::signal::kill;
 use nix::sys::wait::waitpid;
 use nix::unistd::{ForkResult, Pid};
-use pty::fork::*;
+use pty_process::blocking::*;
 use serde::{Deserialize, Serialize};
 use signal_hook::{
     consts::{SIGINT, SIGTERM, SIGWINCH},
@@ -17,10 +16,7 @@ use std::fs::{self, remove_file};
 use std::io::{self, stdout, Read};
 use std::io::{ErrorKind, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
-use std::os::unix::prelude::AsRawFd;
-use std::os::unix::process::CommandExt;
 use std::path::Path;
-use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
@@ -67,21 +63,21 @@ fn server(
     let dir = env::current_dir()?;
     Daemonize::new().working_directory(dir).start()?;
 
-    match Fork::from_ptmx()? {
-        Fork::Parent(pid, master) => {
-            run_server_parent_process(pid, master, socket_path, unix_listener)?;
-        }
-        Fork::Child(_) => {
-            Command::new(command).args(args).exec();
-        }
-    }
+    let pty = Pty::new()?;
+    let mut cmd = Command::new(command);
+    let child = cmd.spawn(&pty.pts()?)?;
+    run_server_parent_process(
+        child.id(),
+        Arc::new(RwLock::new(pty)),
+        socket_path,
+        unix_listener,
+    )?;
     Ok(())
 }
 
-#[logfn_inputs(Debug)]
 fn run_server_parent_process(
-    pid: i32,
-    master: Master,
+    pid: u32,
+    master: Arc<RwLock<Pty>>,
     socket_path: String,
     unix_listener: UnixListener,
 ) -> anyhow::Result<()> {
@@ -90,7 +86,7 @@ fn run_server_parent_process(
     let master_readers: Arc<RwLock<Vec<UnixStream>>> = Arc::new(RwLock::new(vec![]));
     let master_readers_2 = master_readers.clone();
 
-    start_thread_to_send_data_from_forked_process_to_clients(master, master_readers);
+    start_thread_to_send_data_from_forked_process_to_clients(master.clone(), master_readers);
 
     // put the server logic in a loop to accept several connections
     loop {
@@ -103,7 +99,7 @@ fn run_server_parent_process(
         r.push(unix_stream.try_clone().unwrap());
 
         start_thread_to_handle_clients_messages(
-            master,
+            master.clone(),
             pid,
             TimeoutReader::new(unix_stream.try_clone()?, Duration::from_millis(10)),
         );
@@ -111,19 +107,18 @@ fn run_server_parent_process(
 }
 
 #[logfn(Debug)]
-#[logfn_inputs(Debug)]
 fn start_thread_to_send_data_from_forked_process_to_clients(
-    master: Master,
+    master: Arc<RwLock<Pty>>,
     master_readers: Arc<RwLock<Vec<UnixStream>>>,
 ) {
     // forked-process > unix stream
-    let mut master_reader = master;
+    let master_reader = master;
     let mut bytesr = [0; 1024];
     thread::spawn(move || loop {
         let mut should_sleep = false;
         {
             let mut to_remove = None;
-            match master_reader.read(&mut bytesr) {
+            match master_reader.write().unwrap().read(&mut bytesr) {
                 // start
                 Ok(size) => match master_readers.try_write() {
                     Err(_) => {
@@ -153,25 +148,20 @@ fn start_thread_to_send_data_from_forked_process_to_clients(
         }
     });
 }
+
 #[logfn(Debug)]
-fn send_tiowinsz(ws_row: u16, ws_col: u16, master2: Master) {
-    let us = UnixSize {
-        ws_row,
-        ws_col,
-        ws_xpixel: 0,
-        ws_ypixel: 0,
-    };
-    debug!("send TIOCSWINSZ {:?}", us);
-    unsafe {
-        let r = libc::ioctl(master2.as_raw_fd(), TIOCSWINSZ, &us);
-        debug!("TIOCSWINSZ result: {:?}", r);
-    };
+fn send_tiowinsz(ws_row: u16, ws_col: u16, master2: Arc<RwLock<Pty>>) {
+    master2
+        .write()
+        .unwrap()
+        .resize(pty_process::Size::new(ws_row, ws_col))
+        .unwrap();
 }
 
 #[logfn(Debug)]
 fn start_thread_to_handle_clients_messages(
-    mut master2: Master,
-    pid: i32,
+    master2: Arc<RwLock<Pty>>,
+    pid: u32,
     mut reader: TimeoutReader<UnixStream>,
 ) {
     thread::spawn(move || {
@@ -179,17 +169,17 @@ fn start_thread_to_handle_clients_messages(
             match receive_message(&mut reader) {
                 Ok(message) => {
                     if message.mode == Mode::TermSize {
-                        send_tiowinsz(message.size.1, message.size.0, master2)
+                        send_tiowinsz(message.size.1, message.size.0, master2.clone())
                     } else if message.mode == Mode::Write {
-                        if master2.write(&message.bytes).is_err() {
+                        if master2.write().unwrap().write(&message.bytes).is_err() {
                             break;
                         }
                     } else if message.mode == Mode::Detach {
                         // see send_detach_message() for explanation
-                        send_tiowinsz(message.size.1, message.size.0, master2)
+                        send_tiowinsz(message.size.1, message.size.0, master2.clone())
                     } else if message.mode == Mode::Redraw {
                         debug!("send kill for pid: {:?}", pid);
-                        let r = kill(Pid::from_raw(pid), nix::sys::signal::SIGWINCH);
+                        let r = kill(Pid::from_raw(pid as i32), nix::sys::signal::SIGWINCH);
                         debug!("redraw result: {:?}", r);
                     }
                 }
@@ -268,6 +258,7 @@ fn send_message(unix_stream: &mut UnixStream, message: &Message) -> anyhow::Resu
     unix_stream.write_all(&encoded[..]).map_err(|x| x.into())
 }
 
+#[logfn(Debug)]
 fn receive_message(unix_stream_reader: &mut TimeoutReader<UnixStream>) -> anyhow::Result<Message> {
     let mut len_array = vec![0; 1];
     unix_stream_reader.read_exact(&mut len_array)?;
@@ -279,6 +270,8 @@ fn receive_message(unix_stream_reader: &mut TimeoutReader<UnixStream>) -> anyhow
         .map_err(|x| x.into())
 }
 
+#[logfn(Debug)]
+#[logfn_inputs(Debug)]
 pub fn underlying_io_error_kind(error: &anyhow::Error) -> Option<io::ErrorKind> {
     for cause in error.chain() {
         if let Some(io_error) = cause.downcast_ref::<io::Error>() {
