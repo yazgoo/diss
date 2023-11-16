@@ -22,6 +22,10 @@ struct Args {
     #[clap(short, long, value_parser)]
     attach_session: Option<String>,
 
+    // kill session
+    #[clap(short, long, value_parser)]
+    kill: Option<String>,
+
     // command
     command: Vec<String>,
 }
@@ -51,6 +55,13 @@ fn main() -> anyhow::Result<()> {
         for session in list_sessions()? {
             println!("{}", session);
         }
+    }
+    if args.kill.is_some() {
+        return args
+            .kill
+            .as_ref()
+            .map(|session_name| diss::kill_session(session_name))
+            .unwrap();
     }
     let env = HashMap::new();
     args.attach_session

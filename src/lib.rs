@@ -5,7 +5,7 @@ use nix::libc;
 use nix::libc::{c_ushort, TIOCSWINSZ};
 use nix::sys::signal::kill;
 use nix::sys::wait::waitpid;
-use nix::unistd::{ForkResult, Pid};
+use nix::unistd::{getpgid, ForkResult, Pid};
 use pty::fork::*;
 use serde::{Deserialize, Serialize};
 use signal_hook::{
@@ -294,7 +294,6 @@ fn escape_key_to_byte(escape_key: Option<String>) -> u8 {
     let allowed_keys = vec![
         "a".to_string(),
         "b".to_string(),
-        "c".to_string(),
         "d".to_string(),
         "e".to_string(),
         "f".to_string(),
@@ -526,6 +525,40 @@ pub fn list_sessions() -> anyhow::Result<Vec<String>> {
         })
         .collect();
     Ok(res)
+}
+
+#[logfn(Debug)]
+#[logfn_inputs(Debug)]
+pub fn kill_session(session_name: &str) -> anyhow::Result<()> {
+    let socket_path = session_name_to_socket_path(session_name.to_string())?;
+    if Path::new(&socket_path).exists() {
+        // find processes attached to named socket with socket_path
+        let output = Command::new("lsof")
+            .arg("-tUac")
+            .arg("")
+            .arg(&socket_path)
+            .output()
+            .context("failed to execute lsof")?;
+        output
+            .stdout
+            .split(|&x| x == b'\n')
+            .map(|x| String::from_utf8(x.to_vec()).unwrap_or("".to_string()))
+            .filter(|x| x != "")
+            .for_each(|pid_s| {
+                let pid = pid_s.parse::<i32>().unwrap();
+                match getpgid(Some(Pid::from_raw(pid))) {
+                    Ok(pgid) => {
+                        debug!("killing pid: {}", pid);
+                        let _ = kill(Pid::from_raw(-(pgid.as_raw())), nix::sys::signal::SIGKILL);
+                        pgid;
+                    }
+                    Err(_) => {}
+                };
+            });
+        debug!("removing unix named pipe {}", &socket_path);
+        remove_file(&socket_path)?;
+    }
+    Ok(())
 }
 
 #[logfn(Debug)]
