@@ -215,6 +215,7 @@ struct UnixSize {
 #[logfn(Debug)]
 #[logfn_inputs(Debug)]
 fn start_thread_to_cleanup_unix_socket_on_process_status_change(socket_path: String) {
+    #[allow(clippy::never_loop)]
     thread::spawn(move || loop {
         let res = waitpid(None, None).unwrap();
         debug!(
