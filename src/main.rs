@@ -7,24 +7,27 @@ use diss::{list_sessions, run};
 #[clap(author, version, about, long_about = None)]
 struct Args {
     /// list sessions
-    #[clap(short, long, value_parser)]
+    #[clap(short, long)]
     list: bool,
 
     // debug
-    #[clap(short, long, value_parser)]
+    #[clap(short, long)]
     debug: bool,
 
     // escape key
-    #[clap(short, long, value_parser)]
+    #[clap(short, long)]
     escape_key: Option<String>,
 
     // session name
-    #[clap(short, long, value_parser)]
+    #[clap(short, long)]
+    #[clap(required = true)]
     attach_session: Option<String>,
 
     // command
+    #[clap(required = true)]
     command: Vec<String>,
 }
+
 
 fn setup_logger() -> Result<(), fern::InitError> {
     fern::Dispatch::new()
