@@ -60,9 +60,7 @@ fn server(
     let unix_listener =
         UnixListener::bind(&socket_path).context("Could not create the unix socket")?;
 
-    let socket_path2 = socket_path.clone();
-
-    start_thread_to_cleanup_unix_socket_on_shutdown(socket_path2)?;
+    start_thread_to_cleanup_unix_socket_on_shutdown(socket_path.clone())?;
 
     let dir = env::current_dir()?;
     Daemonize::new().working_directory(dir).start()?;
@@ -88,9 +86,8 @@ fn run_server_parent_process(
     start_thread_to_cleanup_unix_socket_on_process_status_change(socket_path);
 
     let master_readers: Arc<RwLock<Vec<UnixStream>>> = Arc::new(RwLock::new(vec![]));
-    let master_readers_2 = master_readers.clone();
 
-    start_thread_to_send_data_from_forked_process_to_clients(master, master_readers);
+    start_thread_to_send_data_from_forked_process_to_clients(master, master_readers.clone());
 
     // put the server logic in a loop to accept several connections
     loop {
@@ -99,7 +96,7 @@ fn run_server_parent_process(
             .context("Failed at accepting a connection on the unix listener")?;
 
         /* add client to the list of clients */
-        let mut r = master_readers_2.write().unwrap();
+        let mut r = master_readers.write().unwrap();
         r.push(unix_stream.try_clone().unwrap());
 
         start_thread_to_handle_clients_messages(
@@ -154,7 +151,7 @@ fn start_thread_to_send_data_from_forked_process_to_clients(
     });
 }
 #[logfn(Debug)]
-fn send_tiowinsz(ws_row: u16, ws_col: u16, master2: Master) {
+fn send_tiowinsz(ws_row: u16, ws_col: u16, master: Master) {
     let us = UnixSize {
         ws_row,
         ws_col,
@@ -163,14 +160,14 @@ fn send_tiowinsz(ws_row: u16, ws_col: u16, master2: Master) {
     };
     debug!("send TIOCSWINSZ {:?}", us);
     unsafe {
-        let r = libc::ioctl(master2.as_raw_fd(), TIOCSWINSZ, &us);
+        let r = libc::ioctl(master.as_raw_fd(), TIOCSWINSZ, &us);
         debug!("TIOCSWINSZ result: {:?}", r);
     };
 }
 
 #[logfn(Debug)]
 fn start_thread_to_handle_clients_messages(
-    mut master2: Master,
+    mut master: Master,
     pid: i32,
     mut reader: TimeoutReader<UnixStream>,
 ) {
@@ -179,14 +176,14 @@ fn start_thread_to_handle_clients_messages(
             match receive_message(&mut reader) {
                 Ok(message) => {
                     if message.mode == Mode::TermSize {
-                        send_tiowinsz(message.size.1, message.size.0, master2)
+                        send_tiowinsz(message.size.1, message.size.0, master)
                     } else if message.mode == Mode::Write {
-                        if master2.write(&message.bytes).is_err() {
+                        if master.write(&message.bytes).is_err() {
                             break;
                         }
                     } else if message.mode == Mode::Detach {
                         // see send_detach_message() for explanation
-                        send_tiowinsz(message.size.1, message.size.0, master2)
+                        send_tiowinsz(message.size.1, message.size.0, master)
                     } else if message.mode == Mode::Redraw {
                         debug!("send kill for pid: {:?}", pid);
                         let r = kill(Pid::from_raw(pid), nix::sys::signal::SIGWINCH);
@@ -390,14 +387,13 @@ fn send_detach_message(unix_stream_stdin: &mut UnixStream) -> anyhow::Result<()>
 #[logfn(Debug)]
 #[logfn_inputs(Debug)]
 fn run_client(unix_stream: &mut UnixStream, escape_code: u8) -> anyhow::Result<()> {
-    let mut _stdout = stdout().into_raw_mode()?;
+    let mut stdout = stdout().into_raw_mode()?;
     let mut stdin = TimeoutReader::new(io::stdin(), Duration::from_millis(50));
 
     let mut unix_stream_reader =
         TimeoutReader::new(unix_stream.try_clone()?, Duration::from_millis(50));
 
     print!("{}[2J", 27 as char);
-    let mut _stdout2 = stdout();
     let done = Arc::new(AtomicBool::new(false));
 
     let done_in = done.clone();
@@ -407,11 +403,11 @@ fn run_client(unix_stream: &mut UnixStream, escape_code: u8) -> anyhow::Result<(
             match unix_stream_reader.read(&mut bytes) {
                 Ok(_size) => {
                     if _size > 0 {
-                        _stdout2
+                        stdout
                             .write(&bytes[0.._size])
                             .context("failed at writing stdin")
                             .unwrap();
-                        _stdout2.flush().unwrap();
+                        stdout.flush().unwrap();
                     } else {
                         done_in.store(true, Ordering::Relaxed);
                         break;
