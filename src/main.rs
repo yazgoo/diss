@@ -20,14 +20,11 @@ struct Args {
 
     // session name
     #[clap(short, long)]
-    #[clap(required = true)]
     attach_session: Option<String>,
 
     // command
-    #[clap(required = true)]
     command: Vec<String>,
 }
-
 
 fn setup_logger() -> Result<(), fern::InitError> {
     fern::Dispatch::new()
