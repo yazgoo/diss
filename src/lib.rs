@@ -292,6 +292,7 @@ fn escape_key_to_byte(escape_key: Option<String>) -> u8 {
     let allowed_keys = vec![
         "a".to_string(),
         "b".to_string(),
+        "c".to_string(),
         "d".to_string(),
         "e".to_string(),
         "f".to_string(),
@@ -299,6 +300,8 @@ fn escape_key_to_byte(escape_key: Option<String>) -> u8 {
     ];
     escape_key
         .map(|x| {
+            // forbid ctrl + c to be used as escape key
+            let x = if x == "c" { "g".to_string() } else { x };
             allowed_keys
                 .iter()
                 .position(|y| y == &x)
