@@ -305,7 +305,7 @@ fn escape_key_to_byte(escape_key: Option<String>) -> u8 {
                 .map(|i| i as u8 + 1)
                 .unwrap_or(1)
         })
-        .unwrap_or(7) /* default escape key == g */
+        .unwrap_or(allowed_keys.len() as u8) /* default escape key == g */
 }
 
 #[logfn(Debug)]
