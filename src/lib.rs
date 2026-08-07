@@ -391,12 +391,18 @@ fn send_detach_message(unix_stream_stdin: &mut UnixStream) -> anyhow::Result<()>
 #[logfn_inputs(Debug)]
 fn run_client(unix_stream: &mut UnixStream, escape_code: u8) -> anyhow::Result<()> {
     let mut stdout = stdout().into_raw_mode()?;
-    let mut stdin = TimeoutReader::new(io::stdin(), Duration::from_millis(50));
+    let stdin = io::stdin();
+    let mut stdin = TimeoutReader::new(stdin, Duration::from_millis(50));
 
     let mut unix_stream_reader =
         TimeoutReader::new(unix_stream.try_clone()?, Duration::from_millis(50));
 
     print!("{}[2J", 27 as char);
+    // Make sure the cursor is visible on attach: skim (and other TUIs) hide it,
+    // and when reattaching to a pre-existing session neovim only gets a redraw
+    // and may never re-emit the show-cursor sequence, leaving it hidden.
+    print!("\x1b[?25h");
+    stdout.flush()?;
     let done = Arc::new(AtomicBool::new(false));
 
     let done_in = done.clone();
@@ -406,6 +412,7 @@ fn run_client(unix_stream: &mut UnixStream, escape_code: u8) -> anyhow::Result<(
             match unix_stream_reader.read(&mut bytes) {
                 Ok(_size) => {
                     if _size > 0 {
+                        log::debug!("unix_stream_reader: received bytes ({}) {:?}", _size, bytes);
                         stdout
                             .write(&bytes[0.._size])
                             .context("failed at writing stdin")
@@ -448,8 +455,47 @@ fn run_client(unix_stream: &mut UnixStream, escape_code: u8) -> anyhow::Result<(
         match stdin.read(&mut bytesr) {
             Ok(_size) => {
                 if _size > 0 {
-                    if _size == 1 && bytesr[0] == escape_code {
+                    log::debug!("stdin: received bytes ({}) {:?}", _size, bytesr);
+                    // NO idea why CTRL+G is now this sequence of bytes on first run of vmu...
+                    // 27 91 49 48 51 59 53 117 (i.e. the kitty keyboard protocol
+                    // encoding of ctrl+g: `\x1b[103;5u`)
+                    let is_escape = (_size == 1 && bytesr[0] == escape_code)
+                        || (_size == 8
+                            && bytesr[0] == 27
+                            && bytesr[1] == 91
+                            && bytesr[2] == 49
+                            && bytesr[3] == 48
+                            && bytesr[4] == 51
+                            && bytesr[5] == 59
+                            && bytesr[6] == 53
+                            && bytesr[7] == 117);
+                    if is_escape {
+                        log::debug!("received the escape code, detaching");
                         send_detach_message(&mut unix_stream_stdin).unwrap();
+                        // Do NOT forward the escape bytes to the forked process:
+                        // otherwise neovim receives the raw `\x1b[103;5u` sequence
+                        // and briefly renders it as parasite characters.
+                        //
+                        // Turn off the kitty keyboard protocol *now*, while we are
+                        // still in raw mode. Neovim enabled it, so the ctrl+g
+                        // key-release event (`\x1b[103;5:3u`) is otherwise emitted
+                        // and echoed as parasite symbols during the switch-screen
+                        // transition (once raw mode is released and echo is back
+                        // on). Popping the enhancement here stops the terminal from
+                        // generating that event at all -- even if the key is held.
+                        {
+                            let mut out = std::io::stdout();
+                            let _ = out.write_all(b"\x1b[<u");
+                            let _ = out.flush();
+                        }
+                        // Break out immediately: do NOT wait/drain here. The detach
+                        // message above shrinks neovim's pty by one row, which makes
+                        // it redraw (and scroll a line). Any delay keeps the reader
+                        // thread alive long enough to relay that redraw to the real
+                        // terminal, leaving a stray line feed on the switch screen.
+                        // Exiting now tears the connection down before that output
+                        // arrives.
+                        break 'outer;
                     }
                     let res = send_message(
                         &mut unix_stream_stdin,
@@ -469,7 +515,10 @@ fn run_client(unix_stream: &mut UnixStream, escape_code: u8) -> anyhow::Result<(
                     break 'outer;
                 }
             }
-            Err(_) => break,
+            Err(e) => {
+                log::debug!("error reading stdin {:?}", e);
+                break;
+            }
         }
     });
 
