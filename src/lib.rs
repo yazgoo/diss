@@ -95,6 +95,12 @@ fn run_server_parent_process(
             .accept()
             .context("Failed at accepting a connection on the unix listener")?;
 
+        // never block forever writing to a client: a client that stops reading
+        // must not freeze the session for everyone (including the next attach)
+        unix_stream
+            .set_write_timeout(Some(Duration::from_secs(2)))
+            .context("Failed at setting the write timeout on the unix stream")?;
+
         /* add client to the list of clients */
         let mut r = master_readers.write().unwrap();
         r.push(unix_stream.try_clone().unwrap());
@@ -119,7 +125,6 @@ fn start_thread_to_send_data_from_forked_process_to_clients(
     thread::spawn(move || loop {
         let mut should_sleep = false;
         {
-            let mut to_remove = None;
             match master_reader.read(&mut bytesr) {
                 // start
                 Ok(size) => match master_readers.try_write() {
@@ -130,14 +135,18 @@ fn start_thread_to_send_data_from_forked_process_to_clients(
                         if for_read.len() == 0 {
                             should_sleep = true;
                         } else if size > 0 {
-                            for (i, unix_stream) in for_read.iter_mut().enumerate() {
-                                let res = unix_stream.write(&bytesr[0..size]);
-                                if res.is_err() {
-                                    to_remove = Some(i);
+                            // drop every client we failed to write to (write
+                            // errors, or write timeouts for clients that went
+                            // away without closing their socket), so that a
+                            // single dead client cannot block the session
+                            for_read.retain_mut(|unix_stream| {
+                                let res = unix_stream.write_all(&bytesr[0..size]);
+                                if let Err(ref e) = res {
+                                    debug!("dropping client after write error: {:?}", e);
                                 }
-                            }
+                                res.is_ok()
+                            });
                         }
-                        to_remove.map(|i| for_read.remove(i));
                     }
                 },
                 Err(_) => {
@@ -433,9 +442,15 @@ fn run_client(unix_stream: &mut UnixStream, escape_code: u8) -> anyhow::Result<(
     });
 
     let mut signals = Signals::new([SIGWINCH])?;
+    // Keep a handle so the resize thread can be stopped on detach. Otherwise it
+    // lives forever and keeps its clone of the unix stream (i.e. the socket fd)
+    // open. On macOS, the server writing to a client that shut its socket down
+    // but still holds the fd open blocks forever, which wedges the server: the
+    // next attach to that session then shows a blank screen.
+    let signals_handle = signals.handle();
     let mut unix_stream_resize = unix_stream.try_clone()?;
 
-    thread::spawn(move || {
+    let resize_thread = thread::spawn(move || {
         for sig in signals.forever() {
             if sig == SIGWINCH
                 && send_terminal_size_and_refresh_code(&mut unix_stream_resize).is_err()
@@ -527,6 +542,10 @@ fn run_client(unix_stream: &mut UnixStream, escape_code: u8) -> anyhow::Result<(
     let _ = unix_stream.shutdown(std::net::Shutdown::Write);
 
     let _ = unix_stream.shutdown(std::net::Shutdown::Read);
+
+    // stop the resize thread so that its clone of the stream gets dropped
+    signals_handle.close();
+    let _ = resize_thread.join();
 
     Ok(())
 }
