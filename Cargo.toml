@@ -24,7 +24,6 @@ clap = { version = "4.4", features = ["derive"] }
 dirs = "5.0"
 timeout-readwrite = "0.3"
 rand = "0.8"
-whoami = "1.2"
 log = "0.4"
 log-derive = "0.4"
 fern = "0.6"

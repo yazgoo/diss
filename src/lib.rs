@@ -16,6 +16,7 @@ use std::collections::HashMap;
 use std::fs::{self, remove_file};
 use std::io::{self, stdout, Read};
 use std::io::{ErrorKind, Write};
+use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::os::unix::prelude::AsRawFd;
 use std::os::unix::process::CommandExt;
@@ -561,13 +562,30 @@ impl fmt::Display for NoConfigDir {
 #[logfn(Debug)]
 #[logfn_inputs(Debug)]
 fn conf_dir() -> anyhow::Result<String> {
-    let dir = std::env::temp_dir();
     let crate_name = option_env!("CARGO_PKG_NAME").unwrap_or("rda");
-    let dir_str = dir.as_path().display();
-    let user = whoami::username();
-    let confdir = format!("{}/{}.{}", dir_str, user, crate_name);
-    if !Path::new(&confdir).exists() {
-        fs::create_dir(&confdir)?;
+    let uid = unsafe { libc::getuid() };
+    // A short, fixed path: macOS' $TMPDIR is long enough that session socket
+    // paths can exceed the unix socket path limit (104 bytes), and $TMPDIR may
+    // differ depending on how the process is launched.
+    let confdir = format!("/tmp/.{}-{}", crate_name, uid);
+    // /tmp is shared between users: create the directory private to us, and
+    // refuse to use one created by someone else (who could then list, replace
+    // or impersonate our session sockets).
+    match fs::DirBuilder::new().mode(0o700).create(&confdir) {
+        Ok(()) => {}
+        Err(e) if e.kind() == ErrorKind::AlreadyExists => {}
+        Err(e) => {
+            return Err(e).with_context(|| format!("could not create directory {}", confdir))
+        }
+    }
+    let metadata = fs::symlink_metadata(&confdir)
+        .with_context(|| format!("could not stat directory {}", confdir))?;
+    if !metadata.is_dir() || metadata.uid() != uid {
+        anyhow::bail!("{} is not a directory owned by the current user", confdir);
+    }
+    if metadata.mode() & 0o077 != 0 {
+        fs::set_permissions(&confdir, fs::Permissions::from_mode(0o700))
+            .with_context(|| format!("could not restrict permissions of {}", confdir))?;
     }
     Ok(confdir)
 }
